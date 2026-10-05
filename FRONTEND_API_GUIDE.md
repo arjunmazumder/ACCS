@@ -825,3 +825,46 @@ Every vendor has an automated virtual wallet.
   }
 }
 ```
+
+---
+
+## 12. Additions & Changes for the Next.js Frontend
+
+### New endpoints
+
+| Method | Endpoint | Auth | Purpose |
+| :--- | :--- | :--- | :--- |
+| `GET` / `PATCH` | `/api/auth/me/` | Any user | Current user + KYC profile (works for every role). PATCH `full_name`, `date_of_birth`, `profile_img` (multipart). |
+| `POST` | `/api/auth/change-password/` | Any user | `{current_password, new_password, confirm_new_password}` |
+| `POST` | `/api/auth/forgot-password/` | Public | `{phone_number}` — sends a reset OTP |
+| `POST` | `/api/auth/reset-password/` | Public | `{phone_number, otp_code, new_password, confirm_new_password}` |
+| `POST` | `/api/orders/buyer/orders/{id}/cancel/` | Buyer | Cancel own order while `PENDING_ADMIN_APPROVAL`. Optional `{reason}` |
+| `GET` | `/api/orders/buyer/orders/{id}/track/` | Buyer | Pathao tracking timeline for own order |
+| `GET` | `/api/orders/admin/orders/commissions/` | Admin | Paginated commission ledger (`?search=`) |
+| `GET` / `PATCH` | `/api/orders/admin/delivery-settings/` | Admin | Central hub + fallback delivery charges |
+| `GET` | `/api/vendors/shops/me/dashboard` | Vendor | Product / order / revenue / wallet stats for the seller dashboard |
+| `GET` | `/api/core/announcements/` | Any user | Broadcast announcements targeted at the current user |
+
+### Behaviour changes
+
+- Login, OTP-verify, buyer register-verify and admin login responses now include `data.refresh_token`, so SPA clients
+  can refresh with `POST /api/auth/getRefreshToken/ {refresh_token}` without relying on cross-site cookies.
+  Admin login returns the same `{user, kyc_profile}` shape as the regular login.
+- `GET /api/products/products` supports `?category=` (a parent category also matches its sub-categories),
+  `?min_price=`, `?max_price=`, `?in_stock=1` and `?ordering=price|-price|-created_at|title`; search also matches
+  shop and category names.
+- Vendors can open / edit / delete **their own** products in any approval state; editing someone else's product returns
+  403. Editing a `REJECTED` product sends it back to `PENDING`. `woner_commission` is admin-only.
+- Product images: only the owning vendor (or admin) can add / update / delete; setting `is_primary` unsets the others.
+- Categories, cities, policies, about-us and lookups are read-only for non-admins (previously any logged-in user could write).
+- Shop reviews are saved with the correct `reviewer`; a buyer can review each shop once and edit/delete only their own review.
+- Shop profile endpoints accept JSON as well as multipart.
+
+### Demo data
+
+```bash
+python manage.py seed_demo
+```
+
+Creates roles, cities, a category tree, two vendor shops with products, policies and these accounts
+(password `12345678`): admin `01700000001`, buyer `01711111111`, vendors `01722222222` / `01733333333`.

@@ -86,6 +86,7 @@ class AdminWalletViewSet(viewsets.ReadOnlyModelViewSet):
 class BlockedProfilesAPIView(generics.ListAPIView):
     serializer_class = WalletSerializer
     permission_classes = [IsAdminOrSuperAdmin]
+    permission_model = Wallet
     filter_backends = [filters.SearchFilter]
     search_fields = ['user__phone_number', 'user__full_name', 'user__vendor_shop_profile__shop_name']
 
@@ -100,6 +101,7 @@ class AdminWalletTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = WalletTransaction.objects.all().order_by('-created_at')
     serializer_class = WalletTransactionSerializer
     permission_classes = [IsAdminOrSuperAdmin]
+    permission_model = Wallet
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['transaction_type']
     search_fields = ['description', 'wallet__user__phone_number', 'wallet__user__full_name']

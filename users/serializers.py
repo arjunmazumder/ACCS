@@ -426,3 +426,20 @@ class StaffUpdateSerializer(serializers.ModelSerializer):
             instance.user_permissions.set(user_permissions)
             
         return instance
+
+
+class MeUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ('full_name', 'date_of_birth')
+
+
+class ChangePasswordSerializer(serializers.Serializer):
+    current_password = serializers.CharField(write_only=True)
+    new_password = serializers.CharField(write_only=True, min_length=6)
+    confirm_new_password = serializers.CharField(write_only=True, min_length=6)
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_new_password']:
+            raise serializers.ValidationError({"confirm_new_password": "Passwords do not match."})
+        return data

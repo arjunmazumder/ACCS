@@ -1,12 +1,12 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django.shortcuts import get_object_or_404
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter
 from drf_spectacular.utils import extend_schema
-from users.permissions import IsVendorOrReadOnly, IsAdminOrSuperAdmin
+from users.permissions import IsVendorOrReadOnly, IsAdminOrSuperAdmin, IsAdminOrReadOnly
 from .models import City, ShopProfile, ShopReview
 from .serializers import CitySerializer, ShopProfileSerializer, ShopReviewSerializer
 
@@ -24,7 +24,8 @@ class CityViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = City.objects.all()
     serializer_class = CitySerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
+    pagination_class = None
 
 @extend_schema(tags=['Vendors'])
 class ShopProfileViewSet(viewsets.ModelViewSet):
@@ -32,7 +33,7 @@ class ShopProfileViewSet(viewsets.ModelViewSet):
     queryset = ShopProfile.objects.all()
     serializer_class = ShopProfileSerializer
     permission_classes = [IsVendorOrReadOnly]
-    parser_classes = (MultiPartParser, FormParser)
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['shop_type', 'city']
     search_fields = ['shop_name', 'shop_address']
@@ -53,10 +54,52 @@ class ShopProfileViewSet(viewsets.ModelViewSet):
             raise ValidationError({"detail": "A shop profile already exists for this user. Please use PATCH to update it."})
         serializer.save(user=user)
 
-    @action(detail=False, methods=['get'])
+    @action(detail=False, methods=['get'], permission_classes=[permissions.IsAuthenticated])
     def me(self, request):
         shop = get_object_or_404(ShopProfile, user=request.user)
         return Response(ShopProfileSerializer(shop).data)
+
+    @extend_schema(summary="Vendor dashboard statistics for the logged-in shop owner")
+    @action(detail=False, methods=['get'], url_path='me/dashboard', permission_classes=[permissions.IsAuthenticated])
+    def dashboard(self, request):
+        from django.db.models import Sum, Count, F
+        from products.models import Product
+        from orders.models import VendorOrder
+        from wallets.models import Wallet
+
+        shop = get_object_or_404(ShopProfile, user=request.user)
+        products = Product.objects.filter(shop=shop)
+        vendor_orders = VendorOrder.objects.filter(vendor_shop=shop)
+        wallet, _ = Wallet.objects.get_or_create(user=request.user)
+
+        status_counts = {row['status']: row['count'] for row in vendor_orders.values('status').annotate(count=Count('id'))}
+        delivered_revenue = vendor_orders.filter(status='DELIVERED').aggregate(total=Sum('subtotal_amount'))['total'] or 0
+        pipeline_revenue = vendor_orders.exclude(status__in=['CANCELLED', 'RETURNED']).aggregate(total=Sum('subtotal_amount'))['total'] or 0
+
+        return Response({
+            "shop": {"id": shop.id, "shop_name": shop.shop_name, "is_blocked": shop.is_blocked,
+                     "average_rating": shop.average_rating, "total_reviews": shop.total_reviews},
+            "products": {
+                "total": products.count(),
+                "approved": products.filter(approval_status='APPROVED').count(),
+                "pending": products.filter(approval_status='PENDING').count(),
+                "rejected": products.filter(approval_status='REJECTED').count(),
+                "low_stock": products.filter(stock_quantity__gt=0, stock_quantity__lte=F('low_stock_threshold')).count(),
+                "out_of_stock": products.filter(stock_quantity__lte=0).count(),
+            },
+            "orders": {
+                "total": vendor_orders.count(),
+                "by_status": status_counts,
+            },
+            "revenue": {
+                "delivered": float(delivered_revenue),
+                "pipeline": float(pipeline_revenue),
+            },
+            "wallet": {
+                "balance": float(wallet.balance),
+                "credit_limit": float(wallet.credit_limit),
+            },
+        })
 
 @extend_schema(tags=['Vendors'])
 class ShopReviewViewSet(viewsets.ModelViewSet):
@@ -72,7 +115,23 @@ class ShopReviewViewSet(viewsets.ModelViewSet):
         return ShopReview.objects.all().order_by('-created_at')
 
     def perform_create(self, serializer):
-        serializer.save(buyer=self.request.user)
+        shop = serializer.validated_data.get('shop')
+        if ShopReview.objects.filter(shop=shop, reviewer=self.request.user).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"detail": "You have already reviewed this shop."})
+        serializer.save(reviewer=self.request.user)
+
+    def perform_update(self, serializer):
+        if serializer.instance.reviewer != self.request.user and not is_admin(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only edit your own review.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        if instance.reviewer != self.request.user and not is_admin(self.request.user):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You can only delete your own review.")
+        instance.delete()
 
 @extend_schema(tags=['Vendors'])
 class AdminVendorRatingViewSet(viewsets.ReadOnlyModelViewSet):

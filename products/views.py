@@ -2,7 +2,7 @@ from django.db.models import Q, F
 from rest_framework import viewsets, permissions, exceptions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.filters import SearchFilter
+from rest_framework.filters import SearchFilter, OrderingFilter
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.utils import extend_schema, OpenApiResponse
@@ -13,7 +13,7 @@ from .serializers import (
     CategorySerializer, CategoryTreeSerializer,
     ProductSerializer, ProductImageSerializer, ProductRejectSerializer
 )
-from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin
+from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin, IsAdminOrReadOnly
 
 def is_admin(user):
     if not user or not user.is_authenticated:
@@ -24,12 +24,31 @@ def is_admin(user):
         return True
     return False
 
+class IsProductOwnerOrReadOnly(AdminBypassPermission):
+    """
+    Anyone can read. Writes require a vendor with a shop profile (or admin).
+    Object-level writes are limited to the product's own shop owner.
+    """
+    def has_custom_permission(self, request, view):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        return bool(request.user and request.user.is_authenticated)
+
+    def has_custom_object_permission(self, request, view, obj):
+        if request.method in permissions.SAFE_METHODS:
+            return True
+        product = obj.product if isinstance(obj, ProductImage) else obj
+        return bool(product.shop and product.shop.user_id == request.user.id)
+
+
 @extend_schema(tags=['Products'])
 class CategoryViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+    pagination_class = None
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['parent']
     search_fields = ['name', 'description']
@@ -62,11 +81,35 @@ class ProductViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = Product.objects.all()
     serializer_class = ProductSerializer
-    permission_classes = [AdminBypassPermission]
+    permission_classes = [IsProductOwnerOrReadOnly]
     parser_classes = (MultiPartParser, FormParser, JSONParser)
-    filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ['category', 'is_active', 'shop', 'approval_status']
-    search_fields = ['title', 'description']
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['is_active', 'shop', 'approval_status']
+    search_fields = ['title', 'description', 'shop__shop_name', 'category__name']
+    ordering_fields = ['price', 'created_at', 'title', 'stock_quantity']
+
+    def filter_queryset(self, queryset):
+        queryset = super().filter_queryset(queryset)
+        params = self.request.query_params
+
+        # A parent category also matches products of its sub-categories
+        category = params.get('category')
+        if category:
+            queryset = queryset.filter(Q(category_id=category) | Q(category__parent_id=category))
+
+        min_price = params.get('min_price')
+        max_price = params.get('max_price')
+        try:
+            if min_price:
+                queryset = queryset.filter(price__gte=float(min_price))
+            if max_price:
+                queryset = queryset.filter(price__lte=float(max_price))
+        except ValueError:
+            pass
+
+        if params.get('in_stock') in ('1', 'true', 'True'):
+            queryset = queryset.filter(stock_quantity__gt=0)
+        return queryset
 
     def get_queryset(self):
         user = self.request.user
@@ -82,11 +125,13 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         # Public Marketplace (Buyers, Guests, and Vendors browsing the public store):
         # ALWAYS show only active, approved products from unblocked shops
-        return base_qs.filter(
-            is_active=True, 
-            approval_status='APPROVED', 
-            shop__is_blocked=False
-        ).order_by('-created_at')
+        public_q = Q(is_active=True, approval_status='APPROVED', shop__is_blocked=False)
+
+        # Vendors can also open / edit / delete their own products regardless of approval state
+        if self.action != 'list' and user and user.is_authenticated and hasattr(user, 'vendor_shop_profile'):
+            return base_qs.filter(public_q | Q(shop=user.vendor_shop_profile)).order_by('-created_at')
+
+        return base_qs.filter(public_q).order_by('-created_at')
 
     @extend_schema(
         summary="List all products belonging to the logged-in vendor",
@@ -97,12 +142,10 @@ class ProductViewSet(viewsets.ModelViewSet):
         if not hasattr(request.user, 'vendor_shop_profile'):
             return Response({"error": "Only vendors with a shop profile can view their own products."}, status=status.HTTP_403_FORBIDDEN)
         
-        queryset = Product.objects.filter(shop=request.user.vendor_shop_profile).order_by('-created_at')
-        
-        # Optional filter by status for vendor
-        status_param = request.query_params.get('approval_status')
-        if status_param:
-            queryset = queryset.filter(approval_status=status_param.upper())
+        queryset = self.filter_queryset(
+            Product.objects.filter(shop=request.user.vendor_shop_profile)
+            .select_related('shop', 'category').prefetch_related('images').order_by('-created_at')
+        )
             
         page = self.paginate_queryset(queryset)
         if page is not None:
@@ -163,6 +206,15 @@ class ProductViewSet(viewsets.ModelViewSet):
         else:
             raise exceptions.PermissionDenied("Only registered vendors with a shop profile or admins can create products.")
 
+    def perform_update(self, serializer):
+        user = self.request.user
+        instance = serializer.instance
+        if not is_admin(user) and instance.approval_status == 'REJECTED':
+            # A corrected product goes back into the admin review queue
+            serializer.save(approval_status='PENDING', rejection_reason=None)
+        else:
+            serializer.save()
+
     @extend_schema(
         summary="List pending products awaiting admin approval",
         responses={200: ProductSerializer(many=True)}
@@ -205,7 +257,21 @@ class ProductImageViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = ProductImage.objects.all()
     serializer_class = ProductImageSerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [IsProductOwnerOrReadOnly]
     parser_classes = (MultiPartParser, FormParser)
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product']
+
+    def perform_create(self, serializer):
+        product = serializer.validated_data.get('product')
+        if not is_admin(self.request.user):
+            if not product or not product.shop or product.shop.user_id != self.request.user.id:
+                raise exceptions.PermissionDenied("You can only add images to your own products.")
+        image = serializer.save()
+        if image.is_primary:
+            ProductImage.objects.filter(product=image.product).exclude(id=image.id).update(is_primary=False)
+
+    def perform_update(self, serializer):
+        image = serializer.save()
+        if image.is_primary:
+            ProductImage.objects.filter(product=image.product).exclude(id=image.id).update(is_primary=False)

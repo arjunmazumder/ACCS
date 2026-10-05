@@ -7,7 +7,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
-from users.permissions import IsAdminOrSuperAdmin
+from users.permissions import IsAdminOrSuperAdmin, IsAdminOrReadOnly
 from users.models import User
 from orders.models import VendorOrder, OrderCommission, Order
 from vendors.models import ShopProfile
@@ -40,14 +40,16 @@ class PolicyViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = Policy.objects.all()
     serializer_class = PolicySerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
+    pagination_class = None
 
 @extend_schema(tags=['Core'])
 class AboutUsViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = AboutUs.objects.all()
     serializer_class = AboutUsSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
+    pagination_class = None
 
 # --- Admin Views ---
 
@@ -69,7 +71,7 @@ class BroadcastAnnouncementViewSet(viewsets.ModelViewSet):
 )
 class AdminAnalyticsDashboardAPIView(APIView):
     """
-    Returns aggregated stats for the Admin Dashboard.
+    Returns aggregated stats for the Admin Dashboard (open to all staff).
     """
     permission_classes = [IsAdminOrSuperAdmin]
 
@@ -157,3 +159,24 @@ class AdminAnalyticsDashboardAPIView(APIView):
         }
         
         return Response(data)
+
+
+@extend_schema(tags=['Core'], summary="Announcements visible to the logged-in user")
+class MyAnnouncementsAPIView(APIView):
+    from rest_framework.permissions import IsAuthenticated as _IsAuthenticated
+    permission_classes = [_IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        audiences = ['ALL']
+        role = (user.role.value.upper() if getattr(user, 'role', None) else '')
+        if role == 'BUYER':
+            audiences.append('BUYERS')
+        if role in ('VENDOR', 'RETAILER', 'WHOLESALER') or hasattr(user, 'vendor_shop_profile'):
+            audiences.append('VENDORS')
+        if user.is_staff:
+            audiences.append('STAFF')
+        qs = BroadcastAnnouncement.objects.filter(
+            Q(target_audience__in=audiences) | Q(target_audience='SPECIFIC_USERS', specific_targets=user)
+        ).distinct().order_by('-created_at')[:20]
+        return Response(BroadcastAnnouncementSerializer(qs, many=True).data)

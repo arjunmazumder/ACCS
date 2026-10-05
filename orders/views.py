@@ -351,11 +351,33 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(summary="Cancel own order (only while pending admin approval)", request=None, responses={200: OrderSerializer})
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        order = self.get_object()
+        if order.buyer != request.user and not is_admin(request.user):
+            return Response({"error": "You can only cancel your own orders."}, status=status.HTTP_403_FORBIDDEN)
+        if order.status != 'PENDING_ADMIN_APPROVAL':
+            return Response({"error": "Only orders pending approval can be cancelled. Please contact support."}, status=status.HTTP_400_BAD_REQUEST)
+        order.status = 'CANCELLED'
+        order.rejection_reason = request.data.get('reason') or 'Cancelled by buyer.'
+        order.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+        return Response(OrderSerializer(order).data)
+
+    @extend_schema(summary="Track own parcel via Pathao Courier")
+    @action(detail=True, methods=['get'], url_path='track')
+    def track(self, request, pk=None):
+        order = self.get_object()
+        if not order.pathao_consignment_id:
+            return Response({"error": "This order has not been handed over to the courier yet."}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(PathaoService().track_consignment(order.pathao_consignment_id))
+
 @extend_schema(tags=['Orders'])
 class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Order.objects.all().order_by('-created_at')
     serializer_class = OrderSerializer
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [IsAdminOrSuperAdmin]
+    action_permission_models = {'commissions': OrderCommission}
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['status', 'payment_status', 'payment_method', 'fulfillment_type']
     search_fields = ['order_number', 'buyer__phone_number', 'contact_phone']
@@ -557,6 +579,24 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
             "message": f"Order {order.order_number} successfully restocked and commissions refunded to vendor wallets.",
             "order": OrderSerializer(order).data
         }, status=status.HTTP_200_OK)
+
+    @extend_schema(summary="List platform commissions earned per order item", responses={200: OrderCommissionSerializer(many=True)})
+    @action(detail=False, methods=['get'], url_path='commissions')
+    def commissions(self, request):
+        queryset = OrderCommission.objects.select_related(
+            'order_item__order__buyer', 'order_item__shop__user', 'order_item__product'
+        ).order_by('-created_at')
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(order_item__order__order_number__icontains=search) |
+                Q(order_item__shop__shop_name__icontains=search) |
+                Q(order_item__product__title__icontains=search)
+            )
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            return self.get_paginated_response(OrderCommissionSerializer(page, many=True).data)
+        return Response(OrderCommissionSerializer(queryset, many=True).data)
 
     @extend_schema(
         summary="Courier & Restock Inventory Overview",
@@ -833,3 +873,28 @@ class PathaoWebhookAPIView(views.APIView):
 
         return Response({"status": "acknowledged", "consignment_id": consignment_id}, status=status.HTTP_200_OK)
 
+
+
+@extend_schema(tags=['Orders'])
+class DeliverySettingsAPIView(views.APIView):
+    """Central hub & default delivery charge configuration (singleton)."""
+    permission_classes = [IsAdminOrSuperAdmin]
+    permission_model = DeliveryCharge
+    serializer_class = DeliveryChargeSerializer
+
+    def get_object(self):
+        obj = DeliveryCharge.objects.first()
+        if not obj:
+            obj = DeliveryCharge.objects.create(inside_city=60, outside_city=120)
+        return obj
+
+    @extend_schema(summary="Get delivery & central hub settings")
+    def get(self, request):
+        return Response(DeliveryChargeSerializer(self.get_object()).data)
+
+    @extend_schema(summary="Update delivery & central hub settings", request=DeliveryChargeSerializer)
+    def patch(self, request):
+        serializer = DeliveryChargeSerializer(self.get_object(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)

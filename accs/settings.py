@@ -196,12 +196,18 @@ from corsheaders.defaults import default_headers
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_HEADERS = list(default_headers) + [
     "x-client-type",
+    "x-guest-id",
 ]
 CORS_ALLOW_CREDENTIALS = True
 
 AUTOMAS_SMS_API_KEY = os.environ.get('AUTOMAS_SMS_API_KEY', '')
 AUTOMAS_SMS_SENDER_ID = os.environ.get('AUTOMAS_SMS_SENDER_ID', '')
 AUTOMAS_SMS_URL = os.environ.get('AUTOMAS_SMS_URL', 'https://api.automas.com.bd/smsapiv3')
+
+# Never send real SMS while running the test suite
+import sys
+if 'test' in sys.argv:
+    AUTOMAS_SMS_API_KEY = ''
 
 # Pathao Courier API Settings
 PATHAO_BASE_URL = os.environ.get('PATHAO_BASE_URL', 'https://courier-api-sandbox.pathao.com')
