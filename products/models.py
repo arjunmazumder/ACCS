@@ -26,6 +26,8 @@ class Product(models.Model):
         ('PERCENTAGE', 'Percentage'),
     )
 
+
+
     APPROVAL_STATUS_CHOICES = (
         ('PENDING', 'Pending'),
         ('APPROVED', 'Approved'),
