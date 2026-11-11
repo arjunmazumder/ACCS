@@ -90,10 +90,11 @@ class RegisterSerializer(serializers.ModelSerializer):
     nid_front_image = serializers.ImageField(required=False)
     nid_back_image = serializers.ImageField(required=False)
     birth_certificate_image = serializers.ImageField(required=False)
+    otp_code = serializers.CharField(required=False, write_only=True)
 
     class Meta:
         model = User
-        fields = ('phone_number', 'full_name', 'date_of_birth', 'role', 'password', 'confirm_password', 'profile_img', 'nid_number', 'nid_front_image', 'nid_back_image', 'birth_certificate_image')
+        fields = ('phone_number', 'full_name', 'date_of_birth', 'role', 'password', 'confirm_password', 'profile_img', 'nid_number', 'nid_front_image', 'nid_back_image', 'birth_certificate_image', 'otp_code')
 
     def validate(self, data):
         if data.get('password') != data.get('confirm_password'):
@@ -116,7 +117,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        validated_data.pop('confirm_password')
+        validated_data.pop('confirm_password', None)
+        validated_data.pop('otp_code', None)
         password = validated_data.pop('password')
         
         # Extract KYC data

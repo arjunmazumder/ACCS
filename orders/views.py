@@ -351,6 +351,38 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
+    @extend_schema(
+        summary="Cancel Order (Buyer cancel before approval)",
+        responses={200: OrderSerializer}
+    )
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        order = self.get_object()
+        if order.buyer != request.user and not is_admin(request.user):
+            return Response({"error": "You do not have permission to cancel this order."}, status=status.HTTP_403_FORBIDDEN)
+        if order.status != 'PENDING_ADMIN_APPROVAL':
+            return Response({"error": f"Cannot cancel order with status '{order.status}'. Only pending orders can be cancelled directly."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        reason = request.data.get('reason', 'Cancelled by buyer.')
+        order.status = 'CANCELLED'
+        order.rejection_reason = reason
+        order.save(update_fields=['status', 'rejection_reason', 'updated_at'])
+        return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
+
+    @extend_schema(summary="Track parcel for buyer order")
+    @action(detail=True, methods=['get'], url_path='track')
+    def track(self, request, pk=None):
+        order = self.get_object()
+        if order.buyer != request.user and not is_admin(request.user):
+            return Response({"error": "You do not have permission to view tracking for this order."}, status=status.HTTP_403_FORBIDDEN)
+        if not order.pathao_consignment_id:
+            return Response({"error": "This order has not been dispatched to courier yet."}, status=status.HTTP_400_BAD_REQUEST)
+        
+        pathao = PathaoService()
+        tracking_info = pathao.track_consignment(order.pathao_consignment_id)
+        return Response(tracking_info)
+
+
 @extend_schema(tags=['Orders'])
 class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = Order.objects.all().order_by('-created_at')
@@ -359,6 +391,33 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['status', 'payment_status', 'payment_method', 'fulfillment_type']
     search_fields = ['order_number', 'buyer__phone_number', 'contact_phone']
+
+    @extend_schema(
+        summary="List all order item commissions",
+        responses={200: OrderCommissionSerializer(many=True)}
+    )
+    @action(detail=False, methods=['get'], url_path='commissions')
+    def commissions(self, request):
+        queryset = OrderCommission.objects.select_related(
+            'order_item', 'order_item__order', 'order_item__order__buyer',
+            'order_item__shop', 'order_item__product'
+        ).order_by('-created_at')
+
+        search = request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(order_item__order__order_number__icontains=search) |
+                Q(order_item__shop__shop_name__icontains=search) |
+                Q(order_item__product__title__icontains=search)
+            )
+
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = OrderCommissionSerializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = OrderCommissionSerializer(queryset, many=True)
+        return Response(serializer.data)
+
 
     @extend_schema(
         summary="Approve Order (Creates VendorOrders, reserves stock, debits commission, optional pickup & delivery overrides)",
@@ -489,10 +548,11 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=['post'], url_path='simulate-delivery')
     def simulate_delivery(self, request, pk=None):
         order = self.get_object()
+        order.status = 'DELIVERED'
         order.pathao_order_status = 'Delivered'
         order.payment_status = 'PAID'
-        order.vendor_orders.filter(status__in=['PROCESSING', 'PACKED', 'SHIPPED']).update(status='DELIVERED')
-        order.save(update_fields=['pathao_order_status', 'payment_status', 'updated_at'])
+        order.vendor_orders.filter(status__in=['PENDING', 'PROCESSING', 'PACKED', 'SHIPPED']).update(status='DELIVERED')
+        order.save(update_fields=['status', 'pathao_order_status', 'payment_status', 'updated_at'])
         return Response({
             "message": "Order successfully marked as DELIVERED and PAID (Simulated Pathao Webhook)",
             "order": OrderSerializer(order).data
@@ -823,13 +883,47 @@ class PathaoWebhookAPIView(views.APIView):
             normalized_status = str(event_status).lower()
             if 'delivered' in normalized_status:
                 order.payment_status = 'PAID'
-                order.vendor_orders.filter(status__in=['PROCESSING', 'PACKED', 'SHIPPED']).update(status='DELIVERED')
+                order.status = 'DELIVERED'
+                order.vendor_orders.filter(status__in=['PENDING', 'PROCESSING', 'PACKED', 'SHIPPED']).update(status='DELIVERED')
             elif 'returned' in normalized_status:
-                order.vendor_orders.filter(status__in=['PROCESSING', 'PACKED', 'SHIPPED']).update(status='CANCELLED')
+                order.vendor_orders.filter(status__in=['PENDING', 'PROCESSING', 'PACKED', 'SHIPPED']).update(status='CANCELLED')
             elif 'in_transit' in normalized_status or 'picked_up' in normalized_status:
-                order.vendor_orders.filter(status__in=['PROCESSING', 'PACKED']).update(status='SHIPPED')
+                order.vendor_orders.filter(status__in=['PENDING', 'PROCESSING', 'PACKED']).update(status='SHIPPED')
 
-            order.save(update_fields=['pathao_order_status', 'payment_status', 'updated_at'])
+            order.save(update_fields=['status', 'pathao_order_status', 'payment_status', 'updated_at'])
 
         return Response({"status": "acknowledged", "consignment_id": consignment_id}, status=status.HTTP_200_OK)
 
+
+
+@extend_schema(tags=['Orders'])
+class AdminDeliverySettingsAPIView(views.APIView):
+    permission_classes = [IsAdminOrSuperAdmin]
+    serializer_class = DeliveryChargeSerializer
+
+    def get(self, request):
+        charge = DeliveryCharge.objects.first()
+        if not charge:
+            charge = DeliveryCharge.objects.create(
+                inside_city=Decimal('60.00'),
+                outside_city=Decimal('120.00'),
+                hub_name="Central Warehouse",
+                hub_address="Dhaka Central Hub, Bangladesh",
+                hub_phone="01700000000"
+            )
+        return Response(DeliveryChargeSerializer(charge).data)
+
+    def patch(self, request):
+        charge = DeliveryCharge.objects.first()
+        if not charge:
+            charge = DeliveryCharge.objects.create(
+                inside_city=Decimal('60.00'),
+                outside_city=Decimal('120.00'),
+                hub_name="Central Warehouse",
+                hub_address="Dhaka Central Hub, Bangladesh",
+                hub_phone="01700000000"
+            )
+        serializer = DeliveryChargeSerializer(charge, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)

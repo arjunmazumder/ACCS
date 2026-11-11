@@ -14,9 +14,10 @@ def calculate_product_unit_price(product, quantity):
     if product.discount_type != 'NONE' and product.discount_value:
         now = timezone.now()
         is_discount_valid = True
-        if product.discount_start_date and product.discount_end_date:
-            if not (product.discount_start_date <= now <= product.discount_end_date):
-                is_discount_valid = False
+        if product.discount_end_date and now > product.discount_end_date:
+            is_discount_valid = False
+        if product.discount_start_date and product.discount_start_date.date() > now.date():
+            is_discount_valid = False
                 
         if is_discount_valid:
             if product.discount_type == 'FLAT':

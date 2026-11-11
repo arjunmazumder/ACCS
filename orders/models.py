@@ -34,6 +34,7 @@ class Order(models.Model):
     STATUS_CHOICES = (
         ('PENDING_ADMIN_APPROVAL', 'Pending Admin Approval'),
         ('APPROVED', 'Approved (Sent to Vendor)'),
+        ('DELIVERED', 'Delivered'),
         ('REJECTED', 'Rejected'),
         ('CANCELLED', 'Cancelled'),
         ('RETURNED', 'Returned'),

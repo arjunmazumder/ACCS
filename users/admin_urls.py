@@ -1,4 +1,4 @@
-from django.urls import path, include
+from django.urls import path, re_path, include
 from rest_framework.routers import DefaultRouter
 from .views import AdminLoginView, PermissionListView, RoleViewSet, StaffViewSet
 from vendors.views import AdminVendorRatingViewSet
@@ -11,8 +11,8 @@ router.register(r'ratings/vendors', AdminVendorRatingViewSet, basename='admin-ra
 router.register(r'broadcast', BroadcastAnnouncementViewSet, basename='admin-broadcast')
 
 urlpatterns = [
-    path('login/', AdminLoginView.as_view(), name='admin-login'),
-    path('permissions/', PermissionListView.as_view(), name='admin-permissions'),
-    path('dashboard/analytics/', AdminAnalyticsDashboardAPIView.as_view(), name='admin-analytics'),
+    re_path(r'^login/?$', AdminLoginView.as_view(), name='admin-login'),
+    re_path(r'^permissions/?$', PermissionListView.as_view(), name='admin-permissions'),
+    re_path(r'^dashboard/analytics/?$', AdminAnalyticsDashboardAPIView.as_view(), name='admin-analytics'),
     path('', include(router.urls)),
 ]

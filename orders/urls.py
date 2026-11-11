@@ -3,7 +3,8 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CartViewSet, OrderViewSet, AdminOrderViewSet, VendorOrderViewSet,
     PathaoCitiesAPIView, PathaoZonesAPIView, PathaoAreasAPIView,
-    PathaoStoresAPIView, PathaoCalculatePriceAPIView, PathaoWebhookAPIView
+    PathaoStoresAPIView, PathaoCalculatePriceAPIView, PathaoWebhookAPIView,
+    AdminDeliverySettingsAPIView
 )
 
 router = DefaultRouter()
@@ -12,9 +13,10 @@ router.register(r'buyer/orders', OrderViewSet, basename='buyer-orders')
 router.register(r'admin/orders', AdminOrderViewSet, basename='admin-orders')
 router.register(r'vendor/orders', VendorOrderViewSet, basename='vendor-orders')
 
-
-
 urlpatterns = [
+    # Delivery Settings
+    path('admin/delivery-settings/', AdminDeliverySettingsAPIView.as_view(), name='admin-delivery-settings'),
+
     # Pathao Courier Endpoints
     path('pathao/cities/', PathaoCitiesAPIView.as_view(), name='pathao-cities'),
     path('pathao/zones/', PathaoZonesAPIView.as_view(), name='pathao-zones'),
@@ -27,4 +29,3 @@ urlpatterns = [
 
     path('', include(router.urls)),
 ]
-

@@ -13,7 +13,7 @@ from .serializers import (
     CategorySerializer, CategoryTreeSerializer,
     ProductSerializer, ProductImageSerializer, ProductRejectSerializer
 )
-from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin
+from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin, IsAdminOrReadOnly
 
 def is_admin(user):
     if not user or not user.is_authenticated:
@@ -29,7 +29,7 @@ class CategoryViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = Category.objects.all()
     serializer_class = CategorySerializer
-    permission_classes = [permissions.IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['parent']
     search_fields = ['name', 'description']

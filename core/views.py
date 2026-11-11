@@ -7,7 +7,7 @@ from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
-from users.permissions import IsAdminOrSuperAdmin
+from users.permissions import IsAdminOrSuperAdmin, IsAdminOrReadOnly
 from users.models import User
 from orders.models import VendorOrder, OrderCommission, Order
 from vendors.models import ShopProfile
@@ -40,18 +40,43 @@ class PolicyViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = Policy.objects.all()
     serializer_class = PolicySerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
 
 @extend_schema(tags=['Core'])
 class AboutUsViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     queryset = AboutUs.objects.all()
     serializer_class = AboutUsSerializer
-    permission_classes = [IsAuthenticatedOrReadOnly]
+    permission_classes = [IsAdminOrReadOnly]
 
 # --- Admin Views ---
 
 @extend_schema(tags=['Core'])
+
+@extend_schema(tags=['Core'])
+class PublicBroadcastAnnouncementViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Public / Authenticated endpoint to read platform announcements.
+    """
+    serializer_class = BroadcastAnnouncementSerializer
+    permission_classes = [IsAuthenticatedOrReadOnly]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return BroadcastAnnouncement.objects.filter(target_audience='ALL').order_by('-created_at')
+        
+        user_role = (user.role.value if user.role else '').upper()
+        q = Q(target_audience='ALL')
+        if user_role == 'BUYER':
+            q |= Q(target_audience='BUYERS')
+        elif user_role in ['VENDOR', 'RETAILER', 'WHOLESALER']:
+            q |= Q(target_audience='VENDORS')
+        elif user.is_staff:
+            q |= Q(target_audience='STAFF')
+        q |= Q(specific_targets=user)
+        return BroadcastAnnouncement.objects.filter(q).distinct().order_by('-created_at')
+
 class BroadcastAnnouncementViewSet(viewsets.ModelViewSet):
     """
     Dedicated Admin API for creating and managing global announcements.

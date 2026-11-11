@@ -75,16 +75,17 @@ class ProductSerializer(serializers.ModelSerializer):
             
         # Check if discount dates are valid
         now = timezone.now()
-        if obj.discount_start_date and obj.discount_end_date:
-            if not (obj.discount_start_date <= now <= obj.discount_end_date):
-                return None
+        if obj.discount_end_date and now > obj.discount_end_date:
+            return None
+        if obj.discount_start_date and obj.discount_start_date.date() > now.date():
+            return None
                 
         # Calculate discount
         if obj.discount_type == 'FLAT':
-            return max(0.0, float(base_price) - float(obj.discount_value))
+            return round(max(0.0, float(base_price) - float(obj.discount_value)), 2)
         elif obj.discount_type == 'PERCENTAGE':
             discount_amount = float(base_price) * (float(obj.discount_value) / 100)
-            return max(0.0, float(base_price) - discount_amount)
+            return round(max(0.0, float(base_price) - discount_amount), 2)
             
         return None
     

@@ -1,11 +1,12 @@
-from django.urls import path, include
+from django.urls import path, re_path, include
 from rest_framework.routers import SimpleRouter
 from drf_spectacular.views import SpectacularSwaggerView, SpectacularRedocView
 from .views import (
     LoginView, RefreshTokenView, LogoutView, RegisterView, SendOTPView, 
     VerifyOTPView,
     BuyerRegisterView, BuyerRegisterVerifyView,
-    KYCProfileView, UserViewSet, ShippingAddressView
+    KYCProfileView, UserViewSet, ShippingAddressView,
+    UserMeView, ForgotPasswordView, ResetPasswordView
 )
 
 router = SimpleRouter(trailing_slash=False)
@@ -16,19 +17,25 @@ urlpatterns = [
     path('docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='users-swagger-ui'),
     path('redoc/', SpectacularRedocView.as_view(url_name='schema'), name='users-redoc'),
 
-    path('register/', RegisterView.as_view(), name='register'),
-    path('login/', LoginView.as_view(), name='login'),
-    path('getRefreshToken/', RefreshTokenView.as_view(), name='refresh-token'),
-    path('logout/', LogoutView.as_view(), name='logout'),
-    path('send-otp/', SendOTPView.as_view(), name='send-otp'),
-    path('verify-otp/', VerifyOTPView.as_view(), name='verify-otp'),
+    re_path(r'^register/?$', RegisterView.as_view(), name='register'),
+    re_path(r'^login/?$', LoginView.as_view(), name='login'),
+    re_path(r'^login-otp/?$', SendOTPView.as_view(), name='login-otp'),
+    re_path(r'^getRefreshToken/?$', RefreshTokenView.as_view(), name='refresh-token'),
+    re_path(r'^logout/?$', LogoutView.as_view(), name='logout'),
+    re_path(r'^send-otp/?$', SendOTPView.as_view(), name='send-otp'),
+    re_path(r'^verify-otp/?$', VerifyOTPView.as_view(), name='verify-otp'),
     
+    # Password Reset
+    re_path(r'^forgot-password/?$', ForgotPasswordView.as_view(), name='forgot-password'),
+    re_path(r'^reset-password/?$', ResetPasswordView.as_view(), name='reset-password'),
+
     # Buyer Auth
-    path('buyer/register/', BuyerRegisterView.as_view(), name='buyer-register'),
-    path('buyer/register-verify/', BuyerRegisterVerifyView.as_view(), name='buyer-register-verify'),
+    re_path(r'^buyer/register/?$', BuyerRegisterView.as_view(), name='buyer-register'),
+    re_path(r'^buyer/register-verify/?$', BuyerRegisterVerifyView.as_view(), name='buyer-register-verify'),
 
     # User Profile & Shipping Address
-    path('profile/', KYCProfileView.as_view(), name='user-profile'),
-    path('shipping-address/', ShippingAddressView.as_view(), name='shipping-address'),
+    re_path(r'^me/?$', UserMeView.as_view(), name='user-me'),
+    re_path(r'^profile/?$', KYCProfileView.as_view(), name='user-profile'),
+    re_path(r'^shipping-address/?$', ShippingAddressView.as_view(), name='shipping-address'),
     path('', include(router.urls)),
 ]

@@ -5,7 +5,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from .permissions import IsAdminOrSuperAdmin
-from rest_framework.parsers import MultiPartParser, FormParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.decorators import action
 from django.contrib.auth.models import Group, Permission
 from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiResponse, OpenApiTypes
@@ -14,7 +14,8 @@ from .serializers import (
     UserSerializer, KYCProfileSerializer,
     UserWithProfileSerializer, BuyerRegisterSerializer, BuyerRegisterVerifySerializer,
     ShippingAddressSerializer, AdminLoginSerializer, PermissionSerializer, RoleSerializer,
-    StaffSerializer, StaffCreateSerializer, StaffUpdateSerializer
+    StaffSerializer, StaffCreateSerializer, StaffUpdateSerializer,
+    ForgotPasswordSerializer, ResetPasswordSerializer
 )
 from .services import login_user, refresh_tokens, logout_user
 from django.utils import timezone
@@ -57,34 +58,59 @@ class RegisterView(APIView):
     serializer_class = RegisterSerializer
 
     def post(self, request):
+        phone_number = request.data.get('phone_number')
+        otp_code = request.data.get('otp_code')
+
+        # Check if already registered
+        if phone_number and User.objects.filter(phone_number=phone_number).exists():
+            return Response({'error': 'An account with this phone number already exists. Please sign in.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate form fields format
         serializer = RegisterSerializer(data=request.data)
-        if serializer.is_valid():
-            user = serializer.save()
-            
-            otp_code = generate_otp(user.phone_number)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Case 1: No OTP provided yet -> Send OTP without creating user in database
+        if not otp_code:
+            otp_code = generate_otp(phone_number)
             expires_at = timezone.now() + timedelta(minutes=5)
-            
             OTPVerification.objects.update_or_create(
-                phone_number=user.phone_number,
+                phone_number=phone_number,
                 defaults={
                     'otp_code': otp_code,
                     'is_verified': False,
                     'expires_at': expires_at
                 }
             )
-            
-            send_otp_sms(user.phone_number, otp_code)
-            
-            response_data = {
-                "status": "success",
-                "message": "Registration successful. OTP sent to phone number.",
-                "data": {
-                    "user": UserWithProfileSerializer(user).data
-                }
+            send_otp_sms(phone_number, otp_code)
+            return Response({
+                "status": "otp_sent",
+                "message": "OTP verification code sent to your phone. Please submit the code to complete registration."
+            }, status=status.HTTP_200_OK)
+
+        # Case 2: OTP provided -> Verify OTP before creating user in database
+        otp_record = OTPVerification.objects.filter(phone_number=phone_number, otp_code=otp_code).first()
+        if not otp_record:
+            return Response({'error': 'Invalid OTP code.'}, status=status.HTTP_400_BAD_REQUEST)
+        if otp_record.is_expired():
+            return Response({'error': 'OTP has expired. Please request a new code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # OTP verified! NOW create the User and KYCProfile in the database
+        user = serializer.save()
+        user.is_phone_verified = True
+        user.save()
+
+        otp_record.is_verified = True
+        otp_record.save()
+
+        response_data = {
+            "status": "success",
+            "message": "Registration successful. Phone number verified.",
+            "data": {
+                "user": UserWithProfileSerializer(user).data
             }
-            
-            return Response(response_data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        }
+        return Response(response_data, status=status.HTTP_201_CREATED)
 
 @extend_schema(
     tags=['Authentication'],
@@ -171,6 +197,9 @@ class SendOTPView(APIView):
         serializer = SendOTPSerializer(data=request.data)
         if serializer.is_valid():
             phone_number = serializer.validated_data['phone_number']
+            if User.objects.filter(phone_number=phone_number).exists():
+                return Response({'error': 'An account with this phone number already exists. Please sign in.'}, status=status.HTTP_400_BAD_REQUEST)
+
             otp_code = generate_otp(phone_number)
             expires_at = timezone.now() + timedelta(minutes=5)
             
@@ -243,6 +272,87 @@ class VerifyOTPView(APIView):
                 return Response({'detail': 'Phone number verified successfully.'}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+
+@extend_schema(
+    tags=['Authentication'],
+    summary="Get or update current logged in user profile",
+)
+class UserMeView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+    serializer_class = UserSerializer
+
+    def get(self, request):
+        return Response(UserWithProfileSerializer(request.user).data)
+
+    def patch(self, request):
+        serializer = UserSerializer(request.user, data=request.data, partial=True)
+        if serializer.is_valid():
+            user = serializer.save()
+            return Response(UserWithProfileSerializer(user).data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@extend_schema(
+    tags=['Authentication'],
+    summary="Request password reset OTP",
+    request=ForgotPasswordSerializer,
+)
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+    serializer_class = ForgotPasswordSerializer
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        if serializer.is_valid():
+            phone_number = serializer.validated_data['phone_number']
+            if not User.objects.filter(phone_number=phone_number).exists():
+                return Response({'error': 'No account found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+            
+            otp_code = generate_otp(phone_number)
+            expires_at = timezone.now() + timedelta(minutes=5)
+            OTPVerification.objects.update_or_create(
+                phone_number=phone_number,
+                defaults={
+                    'otp_code': otp_code,
+                    'is_verified': False,
+                    'expires_at': expires_at
+                }
+            )
+            send_otp_sms(phone_number, otp_code)
+            return Response({'message': 'Reset code sent by SMS'}, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+@extend_schema(
+    tags=['Authentication'],
+    summary="Reset password with OTP",
+    request=ResetPasswordSerializer,
+)
+class ResetPasswordView(APIView):
+    permission_classes = [AllowAny]
+    serializer_class = ResetPasswordSerializer
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        if serializer.is_valid():
+            phone_number = serializer.validated_data['phone_number']
+            otp_code = serializer.validated_data['otp_code']
+            new_password = serializer.validated_data['new_password']
+
+            otp_record = OTPVerification.objects.filter(phone_number=phone_number, otp_code=otp_code).first()
+            if not otp_record or otp_record.is_expired():
+                return Response({'error': 'Invalid or expired OTP code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+            try:
+                user = User.objects.get(phone_number=phone_number)
+                user.set_password(new_password)
+                user.save()
+                otp_record.is_verified = True
+                otp_record.save()
+                return Response({'message': 'Password updated successfully. Please sign in.'}, status=status.HTTP_200_OK)
+            except User.DoesNotExist:
+                return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 @extend_schema(
     tags=['Authentication'],
     summary="Get current user KYC profile",
@@ -273,7 +383,9 @@ class UserViewSet(mixins.ListModelMixin,
     search_fields = ['phone_number', 'full_name']
 
     def get_queryset(self):
-        queryset = User.objects.select_related('role', 'kyc_profile').order_by('-created_at')
+        queryset = User.objects.select_related('role', 'kyc_profile').filter(
+            Q(is_phone_verified=True) | Q(is_staff=True) | Q(is_superuser=True)
+        ).order_by('-created_at')
         role_id = self.request.query_params.get('role_id')
         kyc_status = self.request.query_params.get('kyc_status')
         if role_id:
@@ -281,6 +393,12 @@ class UserViewSet(mixins.ListModelMixin,
         if kyc_status:
             queryset = queryset.filter(kyc_profile__status=kyc_status.upper())
         return queryset
+
+    def perform_destroy(self, instance):
+        if instance == self.request.user:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"error": "You cannot delete your own account."})
+        super().perform_destroy(instance)
 
     def get_serializer_class(self):
         if self.action in ['list', 'retrieve', 'pending']:
@@ -290,7 +408,7 @@ class UserViewSet(mixins.ListModelMixin,
     @extend_schema(summary="List users pending approval or phone verification")
     @action(detail=False, methods=['get'], url_path='pending')
     def pending(self, request):
-        queryset = self.filter_queryset(self.get_queryset().filter(Q(is_approved=False) | Q(is_phone_verified=False)))
+        queryset = self.filter_queryset(self.get_queryset().filter(is_approved=False))
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
