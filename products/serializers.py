@@ -52,6 +52,14 @@ class ProductSerializer(serializers.ModelSerializer):
             ProductImage.objects.create(product=product, image=img, is_primary=(i == 0))
         return product
 
+    def update(self, instance, validated_data):
+        uploaded_images = validated_data.pop('uploaded_images', [])
+        product = super().update(instance, validated_data)
+        has_primary = product.images.filter(is_primary=True).exists()
+        for i, img in enumerate(uploaded_images):
+            ProductImage.objects.create(product=product, image=img, is_primary=(not has_primary and i == 0))
+        return product
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         request = self.context.get('request')
@@ -61,6 +69,8 @@ class ProductSerializer(serializers.ModelSerializer):
             if not is_admin:
                 self.fields['approval_status'].read_only = True
                 self.fields['rejection_reason'].read_only = True
+                # Platform commission is set by admins only
+                self.fields['woner_commission'].read_only = True
 
     def get_after_discount_price(self, obj):
         from django.utils import timezone

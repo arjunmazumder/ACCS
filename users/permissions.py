@@ -1,4 +1,34 @@
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import BasePermission, SAFE_METHODS
+
+
+def has_full_admin_access(user):
+    """Superusers and ADMIN-role users are never limited by model permissions."""
+    return bool(
+        user.is_superuser or
+        (getattr(user, 'role', None) and user.role.name == 'ROLE' and user.role.value == 'ADMIN')
+    )
+
+
+def staff_has_model_permission(request, view):
+    """
+    Staff members (is_staff, not superuser) only get access to admin APIs whose model
+    they hold a Django permission for, assigned directly or through their role (Group).
+    Views declare the model with `permission_model`, `action_permission_models[action]`
+    or simply their `queryset`; views without a model are open to all staff.
+    """
+    user = request.user
+    if has_full_admin_access(user):
+        return True
+    action = getattr(view, 'action', None)
+    model = getattr(view, 'action_permission_models', {}).get(action) or getattr(view, 'permission_model', None)
+    if model is None:
+        queryset = getattr(view, 'queryset', None)
+        model = getattr(queryset, 'model', None)
+    if model is None:
+        return True
+    actions = ('view', 'change') if request.method in SAFE_METHODS else ('add', 'change', 'delete')
+    app_label, model_name = model._meta.app_label, model._meta.model_name
+    return any(user.has_perm(f'{app_label}.{a}_{model_name}') for a in actions)
 
 class AdminBypassPermission(BasePermission):
     """
@@ -34,7 +64,11 @@ class AdminBypassPermission(BasePermission):
 class IsAdminOrSuperAdmin(AdminBypassPermission):
     """
     Allows access only to superusers or users with the 'ADMIN' role.
+    Other staff need the matching model permission (see staff_has_model_permission).
     """
+    def has_permission(self, request, view):
+        return self.is_admin(request) and staff_has_model_permission(request, view)
+
     def has_custom_permission(self, request, view):
         # Admin is handled by base class, so if it reaches here and it's not admin, return False.
         # But base class grants True for admins. So this class is effectively just checking base class logic.
@@ -197,6 +231,7 @@ class HasRequiredPermission(AdminBypassPermission):
             request.user.has_perm(perm)
         )
 
+<<<<<<< HEAD
 
 class IsAdminOrReadOnly(AdminBypassPermission):
     """
@@ -205,3 +240,20 @@ class IsAdminOrReadOnly(AdminBypassPermission):
     """
     def has_custom_permission(self, request, view):
         return request.method in ('GET', 'HEAD', 'OPTIONS')
+=======
+class IsAdminOrReadOnly(AdminBypassPermission):
+    """
+    Safe methods are public; write methods are restricted to Admins / Staff
+    (staff also need the matching model permission).
+    """
+    def has_permission(self, request, view):
+        if request.method in SAFE_METHODS:
+            return True
+        return self.is_admin(request) and staff_has_model_permission(request, view)
+
+    def has_custom_permission(self, request, view):
+        return request.method in ('GET', 'HEAD', 'OPTIONS')
+
+    def has_custom_object_permission(self, request, view, obj):
+        return request.method in ('GET', 'HEAD', 'OPTIONS')
+>>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92

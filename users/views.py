@@ -1,3 +1,5 @@
+import secrets
+
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework import filters, viewsets, mixins
@@ -15,7 +17,11 @@ from .serializers import (
     UserWithProfileSerializer, BuyerRegisterSerializer, BuyerRegisterVerifySerializer,
     ShippingAddressSerializer, AdminLoginSerializer, PermissionSerializer, RoleSerializer,
     StaffSerializer, StaffCreateSerializer, StaffUpdateSerializer,
+<<<<<<< HEAD
     ForgotPasswordSerializer, ResetPasswordSerializer
+=======
+    MeUpdateSerializer, ChangePasswordSerializer, ForgotPasswordSerializer, ResetPasswordSerializer
+>>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 )
 from .services import login_user, refresh_tokens, logout_user
 from django.utils import timezone
@@ -132,6 +138,7 @@ class LoginView(APIView):
                 "message": "Login successful.",
                 "data": {
                     "access_token": access_token,
+                    "refresh_token": refresh_token,
                     "user": UserWithProfileSerializer(user).data
                 }
             }
@@ -152,7 +159,7 @@ class RefreshTokenView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        refresh_token = request.COOKIES.get('refresh_token')
+        refresh_token = request.COOKIES.get('refresh_token') or (request.data.get('refresh_token') if isinstance(request.data, dict) else None)
         if not refresh_token:
             return Response({'detail': 'Refresh token missing.'}, status=status.HTTP_401_UNAUTHORIZED)
             
@@ -160,7 +167,7 @@ class RefreshTokenView(APIView):
         if not access_token:
             return Response({'detail': 'Invalid or expired refresh token.'}, status=status.HTTP_401_UNAUTHORIZED)
             
-        response = Response({'access_token': access_token}, status=status.HTTP_200_OK)
+        response = Response({'access_token': access_token, 'refresh_token': new_refresh_token}, status=status.HTTP_200_OK)
         set_auth_cookies(response, access_token, new_refresh_token)
         return response
 
@@ -175,7 +182,7 @@ class LogoutView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        refresh_token = request.COOKIES.get('refresh_token')
+        refresh_token = request.COOKIES.get('refresh_token') or (request.data.get('refresh_token') if isinstance(request.data, dict) else None)
         if refresh_token:
             logout_user(refresh_token)
             
@@ -240,7 +247,11 @@ class VerifyOTPView(APIView):
                 
             if otp_record.otp_code != otp_code:
                 return Response({'detail': 'Invalid OTP code.'}, status=status.HTTP_400_BAD_REQUEST)
-                
+
+            # A code can only be used once (it also signs the user in)
+            if otp_record.is_verified:
+                return Response({'detail': 'This code has already been used. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
             otp_record.is_verified = True
             otp_record.save()
             
@@ -256,6 +267,7 @@ class VerifyOTPView(APIView):
                         "message": "Phone number verified and login successful.",
                         "data": {
                             "access_token": access_token,
+                            "refresh_token": refresh_token,
                             "user": UserWithProfileSerializer(user).data
                         }
                     }
@@ -521,8 +533,8 @@ class BuyerRegisterVerifyView(APIView):
                     defaults={'is_active': True}
                 )
             
-            clean_digits = ''.join(filter(str.isdigit, phone_number))
-            default_password = clean_digits[-6:] if len(clean_digits) >= 6 else clean_digits
+            # Random password, delivered only by SMS (never derived from the phone number)
+            default_password = f"{secrets.randbelow(10**6):06d}"
 
             user, created = User.objects.get_or_create(
                 phone_number=phone_number,
@@ -552,6 +564,7 @@ class BuyerRegisterVerifyView(APIView):
                 "message": "Registration verified and logged in successfully.",
                 "data": {
                     "access_token": access_token,
+                    "refresh_token": refresh_token,
                     "user": UserWithProfileSerializer(user).data
                 }
             }
@@ -629,7 +642,8 @@ class AdminLoginView(APIView):
                 "message": "Admin login successful.",
                 "data": {
                     "access_token": access_token,
-                    "user": StaffSerializer(user).data
+                    "refresh_token": refresh_token,
+                    "user": UserWithProfileSerializer(user).data
                 }
             }
             
@@ -644,6 +658,7 @@ class AdminLoginView(APIView):
 )
 class PermissionListView(ListAPIView):
     permission_classes = [IsAdminOrSuperAdmin]
+    permission_model = Group
     queryset = Permission.objects.all().order_by('content_type__app_label', 'codename')
     serializer_class = PermissionSerializer
     pagination_class = None
@@ -663,6 +678,7 @@ class RoleViewSet(viewsets.ModelViewSet):
 class StaffViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     permission_classes = [IsAdminOrSuperAdmin]
+    permission_model = Group
     
     def get_queryset(self):
         return User.objects.filter(is_staff=True).prefetch_related('groups').order_by('-created_at')
@@ -673,3 +689,115 @@ class StaffViewSet(viewsets.ModelViewSet):
         if self.action in ['update', 'partial_update']:
             return StaffUpdateSerializer
         return StaffSerializer
+
+
+@extend_schema(tags=['Authentication'])
+class MeView(APIView):
+    """Current logged-in user (works for every role, unlike /profile/ which needs a KYC record)."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser, JSONParser)
+
+    @extend_schema(summary="Get current user with KYC profile", responses={200: UserWithProfileSerializer})
+    def get(self, request):
+        return Response(UserWithProfileSerializer(request.user).data)
+
+    @extend_schema(summary="Update current user basic info", request=MeUpdateSerializer, responses={200: UserWithProfileSerializer})
+    def patch(self, request):
+        serializer = MeUpdateSerializer(request.user, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        # Optional profile image update for users having a KYC profile
+        profile_img = request.FILES.get('profile_img')
+        if profile_img:
+            kyc, _ = KYCProfile.objects.get_or_create(user=request.user)
+            kyc.profile_img = profile_img
+            kyc.save(update_fields=['profile_img'])
+
+        request.user.refresh_from_db()
+        return Response(UserWithProfileSerializer(request.user).data)
+
+
+@extend_schema(tags=['Authentication'], summary="Change password (logged in)", request=ChangePasswordSerializer)
+class ChangePasswordView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if not request.user.check_password(serializer.validated_data['current_password']):
+            return Response({'current_password': ['Current password is incorrect.']}, status=status.HTTP_400_BAD_REQUEST)
+        request.user.set_password(serializer.validated_data['new_password'])
+        request.user.save()
+        return Response({'detail': 'Password changed successfully.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=['Authentication'], summary="Forgot password - send reset OTP", request=ForgotPasswordSerializer)
+class ForgotPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ForgotPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phone_number = serializer.validated_data['phone_number']
+        if not User.objects.filter(phone_number=phone_number).exists():
+            return Response({'detail': 'No account found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+
+        otp_code = generate_otp(phone_number)
+        OTPVerification.objects.update_or_create(
+            phone_number=phone_number,
+            defaults={'otp_code': otp_code, 'is_verified': False, 'expires_at': timezone.now() + timedelta(minutes=5)}
+        )
+        send_otp_sms(phone_number, otp_code)
+        return Response({'detail': 'Password reset OTP sent successfully.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=['Authentication'], summary="Reset password with OTP", request=ResetPasswordSerializer)
+class ResetPasswordView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = ResetPasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        otp_record = OTPVerification.objects.filter(phone_number=data['phone_number'], otp_code=data['otp_code']).first()
+        if not otp_record:
+            return Response({'detail': 'Invalid OTP code.'}, status=status.HTTP_400_BAD_REQUEST)
+        if otp_record.is_expired():
+            return Response({'detail': 'OTP has expired.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = User.objects.get(phone_number=data['phone_number'])
+        except User.DoesNotExist:
+            return Response({'detail': 'No account found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
+
+        user.set_password(data['new_password'])
+        user.is_phone_verified = True
+        user.save()
+        otp_record.delete()
+        return Response({'detail': 'Password reset successfully. Please log in.'}, status=status.HTTP_200_OK)
+
+
+@extend_schema(tags=['Authentication'], summary="Passwordless login - send OTP to a registered phone", request=SendOTPSerializer)
+class LoginOTPView(APIView):
+    """Step 1 of OTP login. Step 2 is POST /api/auth/verify-otp/ which returns tokens."""
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = SendOTPSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        phone_number = serializer.validated_data['phone_number']
+        user = User.objects.filter(phone_number=phone_number).first()
+        if not user:
+            return Response({'detail': 'No account found with this phone number. Please sign up first.'}, status=status.HTTP_404_NOT_FOUND)
+        if not user.is_active:
+            return Response({'detail': 'Your account has been suspended.'}, status=status.HTTP_403_FORBIDDEN)
+
+        otp_code = generate_otp(phone_number)
+        OTPVerification.objects.update_or_create(
+            phone_number=phone_number,
+            defaults={'otp_code': otp_code, 'is_verified': False, 'expires_at': timezone.now() + timedelta(minutes=5)}
+        )
+        send_otp_sms(phone_number, otp_code)
+        return Response({'detail': 'Login code sent to your phone.'}, status=status.HTTP_200_OK)
