@@ -85,6 +85,18 @@ class Order(models.Model):
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='UNPAID')
     
     rejection_reason = models.TextField(blank=True, null=True)
+
+    # Promotions & where the order came from
+    SOURCE_CHOICES = (
+        ('WEBSITE', 'Website checkout'),
+        ('LANDING', 'Landing page'),
+    )
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='WEBSITE')
+    landing_page = models.ForeignKey('marketing.LandingPage', on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    coupon = models.ForeignKey('marketing.Coupon', on_delete=models.SET_NULL, null=True, blank=True, related_name='orders')
+    coupon_code = models.CharField(max_length=40, blank=True, null=True)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    customer_note = models.TextField(blank=True, null=True)
     
     # Return & Restock Inventory Tracking
     is_restocked = models.BooleanField(default=False, help_text="True if returned/cancelled items have been restocked to inventory")

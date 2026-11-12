@@ -1,20 +1,20 @@
 from rest_framework import serializers
-from .models import Category, Product, ProductImage
+from .models import Category, Product, ProductImage, ProductReview
 
 class CategoryChildSerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
-        fields = ('id', 'name', 'description', 'image', 'created_at', 'updated_at')
+        fields = ('id', 'name', 'description', 'image', 'position', 'created_at', 'updated_at')
 
 class CategoryTreeSerializer(serializers.ModelSerializer):
     subcategories = serializers.SerializerMethodField()
 
     class Meta:
         model = Category
-        fields = ('id', 'name', 'description', 'image', 'subcategories', 'created_at', 'updated_at')
+        fields = ('id', 'name', 'description', 'image', 'position', 'subcategories', 'created_at', 'updated_at')
 
     def get_subcategories(self, obj):
-        children = obj.subcategories.all().order_by('name')
+        children = obj.subcategories.all().order_by('position', 'name')
         return CategoryTreeSerializer(children, many=True, context=self.context).data
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -23,7 +23,7 @@ class CategorySerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Category
-        fields = ('id', 'parent', 'parent_name', 'name', 'description', 'image', 'subcategories', 'created_at', 'updated_at')
+        fields = ('id', 'parent', 'parent_name', 'name', 'description', 'image', 'position', 'subcategories', 'created_at', 'updated_at')
         read_only_fields = ['created_at', 'updated_at']
 
 class ProductImageSerializer(serializers.ModelSerializer):
@@ -102,7 +102,7 @@ class ProductSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = '__all__'
-        read_only_fields = ['shop', 'approval_status', 'rejection_reason', 'created_at', 'updated_at']
+        read_only_fields = ['shop', 'approval_status', 'rejection_reason', 'rating_avg', 'rating_count', 'created_at', 'updated_at']
 
     def to_representation(self, instance):
         representation = super().to_representation(instance)
@@ -146,3 +146,21 @@ class ProductRejectSerializer(serializers.Serializer):
         help_text="Optional reason for rejecting the product"
     )
 
+
+
+class ProductReviewSerializer(serializers.ModelSerializer):
+    user_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductReview
+        fields = ('id', 'product', 'user', 'user_name', 'rating', 'comment', 'created_at')
+        read_only_fields = ('user', 'created_at')
+
+    def get_user_name(self, obj):
+        name = (obj.user.full_name or '').strip()
+        return name or f"Buyer {obj.user.phone_number[-3:]}"
+
+    def validate_rating(self, value):
+        if not 1 <= value <= 5:
+            raise serializers.ValidationError('Rating must be between 1 and 5.')
+        return value

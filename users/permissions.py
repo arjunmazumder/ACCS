@@ -231,16 +231,6 @@ class HasRequiredPermission(AdminBypassPermission):
             request.user.has_perm(perm)
         )
 
-<<<<<<< HEAD
-
-class IsAdminOrReadOnly(AdminBypassPermission):
-    """
-    Allows safe methods (GET, HEAD, OPTIONS) for all users.
-    Write methods (POST, PUT, PATCH, DELETE) require Admin/Superadmin/Staff.
-    """
-    def has_custom_permission(self, request, view):
-        return request.method in ('GET', 'HEAD', 'OPTIONS')
-=======
 class IsAdminOrReadOnly(AdminBypassPermission):
     """
     Safe methods are public; write methods are restricted to Admins / Staff
@@ -256,4 +246,3 @@ class IsAdminOrReadOnly(AdminBypassPermission):
 
     def has_custom_object_permission(self, request, view, obj):
         return request.method in ('GET', 'HEAD', 'OPTIONS')
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92

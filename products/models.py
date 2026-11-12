@@ -6,12 +6,14 @@ class Category(models.Model):
     name = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     image = models.ImageField(upload_to='category_images/', blank=True, null=True)
+    position = models.PositiveIntegerField(default=0, help_text="Display order (lower first), e.g. Class 1 before Class 2")
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name_plural = "Categories"
+        ordering = ['position', 'name']
 
     def __str__(self):
         if self.parent:
@@ -38,6 +40,8 @@ class Product(models.Model):
     category = models.ForeignKey(Category, on_delete=models.SET_NULL, null=True, blank=True, related_name='products')
     
     title = models.CharField(max_length=255)
+    author = models.CharField(max_length=255, blank=True, null=True, help_text="Book author / writer")
+    publisher = models.CharField(max_length=255, blank=True, null=True, help_text="Book publisher (prokashoni)")
     description = models.TextField(blank=True, null=True)
     size = models.CharField(max_length=50, blank=True, null=True, help_text="Size of the product (e.g., M, L, XL, 42, 44)")
     
@@ -56,6 +60,10 @@ class Product(models.Model):
     approval_status = models.CharField(max_length=20, choices=APPROVAL_STATUS_CHOICES, default='PENDING')
     rejection_reason = models.TextField(blank=True, null=True)
     is_active = models.BooleanField(default=True)
+
+    # Denormalised from ProductReview for fast listing
+    rating_avg = models.FloatField(default=0.0)
+    rating_count = models.PositiveIntegerField(default=0)
     
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -83,3 +91,39 @@ class ProductImage(models.Model):
 
     def __str__(self):
         return f"Image for {self.product.title} (Primary: {self.is_primary})"
+
+
+class WishlistItem(models.Model):
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='wishlist')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='wishlisted_by')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('user', 'product')
+        ordering = ['-created_at']
+
+
+class ProductReview(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='reviews')
+    user = models.ForeignKey('users.User', on_delete=models.CASCADE, related_name='product_reviews')
+    rating = models.PositiveSmallIntegerField()
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('product', 'user')
+        ordering = ['-created_at']
+
+    def _refresh_product_rating(self):
+        from django.db.models import Avg, Count
+        stats = ProductReview.objects.filter(product_id=self.product_id).aggregate(avg=Avg('rating'), count=Count('id'))
+        Product.objects.filter(id=self.product_id).update(rating_avg=round(stats['avg'] or 0, 2), rating_count=stats['count'])
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self._refresh_product_rating()
+
+    def delete(self, *args, **kwargs):
+        result = super().delete(*args, **kwargs)
+        self._refresh_product_rating()
+        return result

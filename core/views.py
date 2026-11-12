@@ -41,10 +41,7 @@ class PolicyViewSet(viewsets.ModelViewSet):
     queryset = Policy.objects.all()
     serializer_class = PolicySerializer
     permission_classes = [IsAdminOrReadOnly]
-<<<<<<< HEAD
-=======
     pagination_class = None
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 
 @extend_schema(tags=['Core'])
 class AboutUsViewSet(viewsets.ModelViewSet):
@@ -52,14 +49,9 @@ class AboutUsViewSet(viewsets.ModelViewSet):
     queryset = AboutUs.objects.all()
     serializer_class = AboutUsSerializer
     permission_classes = [IsAdminOrReadOnly]
-<<<<<<< HEAD
-=======
     pagination_class = None
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 
 # --- Admin Views ---
-
-@extend_schema(tags=['Core'])
 
 @extend_schema(tags=['Core'])
 class PublicBroadcastAnnouncementViewSet(viewsets.ReadOnlyModelViewSet):
@@ -85,6 +77,7 @@ class PublicBroadcastAnnouncementViewSet(viewsets.ReadOnlyModelViewSet):
         q |= Q(specific_targets=user)
         return BroadcastAnnouncement.objects.filter(q).distinct().order_by('-created_at')
 
+@extend_schema(tags=['Core'])
 class BroadcastAnnouncementViewSet(viewsets.ModelViewSet):
     """
     Dedicated Admin API for creating and managing global announcements.

@@ -25,10 +25,7 @@ class CityViewSet(viewsets.ModelViewSet):
     queryset = City.objects.all()
     serializer_class = CitySerializer
     permission_classes = [IsAdminOrReadOnly]
-<<<<<<< HEAD
-=======
     pagination_class = None
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 
 @extend_schema(tags=['Vendors'])
 class ShopProfileViewSet(viewsets.ModelViewSet):
@@ -62,61 +59,6 @@ class ShopProfileViewSet(viewsets.ModelViewSet):
         shop = get_object_or_404(ShopProfile, user=request.user)
         return Response(ShopProfileSerializer(shop).data)
 
-<<<<<<< HEAD
-    @action(detail=False, methods=['get'])
-    def dashboard(self, request):
-        if not hasattr(request.user, 'vendor_shop_profile'):
-            return Response({"error": "Only vendors with a shop profile can view shop dashboard."}, status=status.HTTP_403_FORBIDDEN)
-        
-        shop = request.user.vendor_shop_profile
-        from orders.models import VendorOrder
-        from products.models import Product
-        from wallets.models import Wallet
-        from django.db.models import Sum, F
-
-        vendor_orders = VendorOrder.objects.filter(vendor_shop=shop)
-        total_orders = vendor_orders.count()
-        by_status = {}
-        for st in ['PROCESSING', 'PACKED', 'SHIPPED', 'DELIVERED', 'CANCELLED', 'RETURNED']:
-            by_status[st] = vendor_orders.filter(status=st).count()
-
-        delivered_rev = vendor_orders.filter(status='DELIVERED').aggregate(total=Sum('subtotal_amount'))['total'] or 0.0
-        pipeline_rev = vendor_orders.filter(status__in=['PROCESSING', 'PACKED', 'SHIPPED']).aggregate(total=Sum('subtotal_amount'))['total'] or 0.0
-
-        products = Product.objects.filter(shop=shop)
-        approved_prods = products.filter(approval_status='APPROVED').count()
-        pending_prods = products.filter(approval_status='PENDING').count()
-        low_stock_prods = products.filter(stock_quantity__gt=0, stock_quantity__lte=F('low_stock_threshold')).count()
-        out_of_stock_prods = products.filter(stock_quantity__lte=0).count()
-
-        wallet = Wallet.objects.filter(user=request.user).first()
-        wallet_balance = float(wallet.balance) if wallet else 0.0
-        credit_limit = float(wallet.credit_limit) if wallet else 2000.0
-
-        return Response({
-            "revenue": {
-                "delivered": float(delivered_rev),
-                "pipeline": float(pipeline_rev)
-            },
-            "orders": {
-                "total": total_orders,
-                "by_status": by_status
-            },
-            "products": {
-                "approved": approved_prods,
-                "pending": pending_prods,
-                "low_stock": low_stock_prods,
-                "out_of_stock": out_of_stock_prods
-            },
-            "wallet": {
-                "balance": wallet_balance,
-                "credit_limit": credit_limit
-            },
-            "shop": {
-                "average_rating": shop.average_rating,
-                "total_reviews": shop.total_reviews
-            }
-=======
     @extend_schema(summary="Vendor dashboard statistics for the logged-in shop owner")
     @action(detail=False, methods=['get'], url_path='me/dashboard', permission_classes=[permissions.IsAuthenticated])
     def dashboard(self, request):
@@ -157,7 +99,6 @@ class ShopProfileViewSet(viewsets.ModelViewSet):
                 "balance": float(wallet.balance),
                 "credit_limit": float(wallet.credit_limit),
             },
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
         })
 
 @extend_schema(tags=['Vendors'])
@@ -174,9 +115,6 @@ class ShopReviewViewSet(viewsets.ModelViewSet):
         return ShopReview.objects.all().order_by('-created_at')
 
     def perform_create(self, serializer):
-<<<<<<< HEAD
-        serializer.save(reviewer=self.request.user)
-=======
         shop = serializer.validated_data.get('shop')
         if ShopReview.objects.filter(shop=shop, reviewer=self.request.user).exists():
             from rest_framework.exceptions import ValidationError
@@ -194,7 +132,6 @@ class ShopReviewViewSet(viewsets.ModelViewSet):
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You can only delete your own review.")
         instance.delete()
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 
 @extend_schema(tags=['Vendors'])
 class AdminVendorRatingViewSet(viewsets.ReadOnlyModelViewSet):

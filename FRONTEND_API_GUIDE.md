@@ -868,3 +868,27 @@ python manage.py seed_demo
 
 Creates roles, cities, a category tree, two vendor shops with products, policies and these accounts
 (password `12345678`): admin `01700000001`, buyer `01711111111`, vendors `01722222222` / `01733333333`.
+
+---
+
+## 13. Book shop, marketing & engagement (2026-11)
+
+| Method | Endpoint | Auth | Purpose |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/api/products/products/home-sections?limit=5` | Public | Every top-level category (Class 1–12) with its latest books |
+| `GET` | `/api/products/products/facets` | Public | Filter counts: `categories`, `publishers`, `authors` for the current search/filters |
+| `GET` | `/api/products/products?category=1,2&publisher=A,B&author=X&discounted=1` | Public | Multi-value filters (comma separated) |
+| `GET/POST/DELETE` | `/api/products/wishlist` (`DELETE ?product_id=`) | User | Saved books |
+| `GET/POST/DELETE` | `/api/products/reviews` (`?product=`), `/reviews/eligibility?product=` | Public read / buyers write | Book reviews; only buyers with an approved/delivered order can review |
+| `GET` | `/api/marketing/banners/` (`?all=1` for admins) | Public | Home page slider |
+| `POST/PATCH/DELETE` | `/api/marketing/banners/` | Admin | Manage banners (multipart: `image`, `mobile_image`, `title`, `subtitle`, `button_text`, `link_url`, `position`, `is_active`, `starts_at`, `ends_at`) |
+| `CRUD` | `/api/marketing/landing-pages/` | Admin | Landing pages; write `product_ids` / `preselected_ids` (list or comma string) |
+| `GET` | `/api/marketing/landing/<slug>/` | Public | Published landing page with its books |
+| `POST` | `/api/marketing/landing/<slug>/order/` | Public | Guest order: `{items:[{product_id,quantity}], full_name, phone_number, address, pathao_city_id, pathao_zone_id, pathao_area_id, coupon_code?, note?}` |
+| `CRUD` | `/api/marketing/coupons/` | Admin | Discount codes |
+| `POST` | `/api/marketing/coupons/validate/` | Public | `{code, subtotal}` → `{discount}` |
+
+- Checkout (`POST /api/orders/buyer/orders/`) accepts `coupon_code` and `note`.
+- Orders now include `discount_amount`, `coupon_code`, `source` (`WEBSITE` / `LANDING`), `landing_page`, `customer_note`; `grand_total` subtracts the discount and so does the Pathao cash-to-collect amount.
+- Books: `Product.author`, `Product.publisher`, `rating_avg`, `rating_count`; `Category.position` orders Class 1 → 12.
+- Demo data: `python manage.py seed_books --reset` (classes, subjects, books with covers, banners, `WELCOME10` coupon, `/offer/ssc-science-pack` landing page).

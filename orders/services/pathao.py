@@ -229,7 +229,7 @@ class PathaoService:
         # Determine amount to collect (0 for online paid, full total for COD)
         amount_to_collect = 0.00
         if order.payment_method == 'COD' and order.payment_status != 'PAID':
-            amount_to_collect = float(order.total_amount + order.total_delivery_charge)
+            amount_to_collect = float(order.total_amount + order.total_delivery_charge - (order.discount_amount or 0))
 
         # Fallback simulation if not configured
         if not self.is_configured():

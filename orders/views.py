@@ -23,6 +23,7 @@ from .serializers import (
 )
 from .utils import calculate_product_unit_price
 from .services.pathao import PathaoService
+from .services.checkout import CheckoutError, place_order
 
 def is_admin(user):
     if not user or not user.is_authenticated:
@@ -231,20 +232,9 @@ class OrderViewSet(viewsets.ModelViewSet):
         cart = Cart.objects.filter(user=request.user).first()
         if not cart or not cart.items.exists():
             return Response({"error": "Your cart is empty. Add products before placing an order."}, status=status.HTTP_400_BAD_REQUEST)
-
         cart_items = list(cart.items.select_related('product', 'product__shop', 'product__shop__city').all())
-        
-        # Validate stock & MOQ for all items
-        for item in cart_items:
-            product = item.product
-            if not product.is_active or product.approval_status != 'APPROVED' or (product.shop and product.shop.is_blocked):
-                return Response({"error": f"Product '{product.title}' is no longer available."}, status=status.HTTP_400_BAD_REQUEST)
-            if product.stock_quantity < item.quantity:
-                return Response({"error": f"Product '{product.title}' has only {product.stock_quantity} in stock."}, status=status.HTTP_400_BAD_REQUEST)
-            if product.moq and item.quantity < product.moq:
-                return Response({"error": f"Minimum order quantity for '{product.title}' is {product.moq}."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Determine buyer shipping details with fallbacks
+        # Shipping details, falling back to the buyer's saved address
         shipping_address = data.get('shipping_address')
         contact_phone = data.get('contact_phone')
         buyer_city = data.get('buyer_city')
@@ -254,140 +244,43 @@ class OrderViewSet(viewsets.ModelViewSet):
 
         saved_addr = getattr(request.user, 'shipping_address', None)
         if not shipping_address:
-            if saved_addr:
-                shipping_address = saved_addr.address
-                if not contact_phone:
-                    contact_phone = saved_addr.phone_number
-                if not recipient_city_id:
-                    recipient_city_id = saved_addr.pathao_city_id or 1
-                if not recipient_zone_id:
-                    recipient_zone_id = saved_addr.pathao_zone_id or 101
-                if not recipient_area_id:
-                    recipient_area_id = saved_addr.pathao_area_id
-            else:
+            if not saved_addr:
                 return Response({"error": "Shipping address is required. Please provide shipping_address or save one in your profile."}, status=status.HTTP_400_BAD_REQUEST)
+            shipping_address = saved_addr.address
+            contact_phone = contact_phone or saved_addr.phone_number
+            recipient_city_id = recipient_city_id or saved_addr.pathao_city_id
+            recipient_zone_id = recipient_zone_id or saved_addr.pathao_zone_id
+            recipient_area_id = recipient_area_id or saved_addr.pathao_area_id
+        if not recipient_city_id and buyer_city and 'dhaka' not in buyer_city.name.lower():
+            recipient_city_id = buyer_city.id
 
-        if not contact_phone:
-            contact_phone = request.user.phone_number
-        if not recipient_city_id:
-            if buyer_city and 'dhaka' in buyer_city.name.lower():
-                recipient_city_id = 1
-            else:
-                recipient_city_id = buyer_city.id if buyer_city else 1
-        if not recipient_zone_id:
-            recipient_zone_id = 101
-
-        # Identify unique vendor shops
-        unique_shops = list(set(item.product.shop for item in cart_items if item.product.shop))
-        delivery_rates = DeliveryCharge.objects.first()
-
-        # Calculate subtotal amount
-        subtotal_amount = sum(item.quantity * item.unit_price for item in cart_items)
-
-        # Determine fulfillment routing
-        if len(unique_shops) <= 1:
-            fulfillment_type = 'DIRECT_VENDOR'
-            primary_shop = unique_shops[0] if unique_shops else None
-            default_pickup_address = primary_shop.shop_address if primary_shop else (delivery_rates.hub_address if delivery_rates else "Vendor Shop")
-            default_pickup_phone = (primary_shop.user.phone_number if primary_shop and primary_shop.user else contact_phone)
-            default_pickup_city = primary_shop.city if primary_shop else None
-            default_store_id = primary_shop.pathao_store_id if primary_shop else None
-        else:
-            fulfillment_type = 'CENTRAL_HUB'
-            default_pickup_address = delivery_rates.hub_address if delivery_rates else "Central Warehouse"
-            default_pickup_phone = delivery_rates.hub_phone if delivery_rates else "01700000000"
-            default_pickup_city = delivery_rates.hub_city if delivery_rates else None
-            default_store_id = delivery_rates.pathao_hub_store_id if delivery_rates else None
-
-        # Calculate dynamic delivery charge via Pathao Live Pricing!
-        pathao = PathaoService()
-        total_weight = sum(item.quantity * 0.5 for item in cart_items)
-        pricing_resp = pathao.calculate_price(
-            store_id=default_store_id,
-            recipient_city=recipient_city_id,
-            recipient_zone=recipient_zone_id,
-            weight=max(0.5, total_weight)
-        )
-        total_delivery_charge = Decimal('60.00')
-        if pricing_resp and 'data' in pricing_resp and 'price' in pricing_resp['data']:
-            total_delivery_charge = Decimal(str(pricing_resp['data']['price']))
-        elif str(recipient_city_id) != '1':
-            total_delivery_charge = Decimal('120.00')
-
-        # Create Order
-        with transaction.atomic():
-            order = Order.objects.create(
+        try:
+            order = place_order(
                 buyer=request.user,
-                buyer_city=buyer_city,
+                lines=[(item.product, item.quantity) for item in cart_items],
                 shipping_address=shipping_address,
-                contact_phone=contact_phone,
-                total_amount=subtotal_amount,
-                total_delivery_charge=total_delivery_charge,
+                contact_phone=contact_phone or request.user.phone_number,
+                buyer_city=buyer_city,
+                recipient_city_id=recipient_city_id,
+                recipient_zone_id=recipient_zone_id,
+                recipient_area_id=recipient_area_id,
                 payment_method=data.get('payment_method', 'COD'),
-                payment_status='UNPAID',
-                fulfillment_type=fulfillment_type,
-                pickup_address=default_pickup_address,
-                pickup_phone=default_pickup_phone,
-                pickup_city=default_pickup_city,
-                pathao_store_id=default_store_id,
-                pathao_recipient_city_id=recipient_city_id,
-                pathao_recipient_zone_id=recipient_zone_id,
-                pathao_recipient_area_id=recipient_area_id,
-                status='PENDING_ADMIN_APPROVAL'
+                coupon_code=data.get('coupon_code'),
+                note=data.get('note'),
             )
+        except CheckoutError as exc:
+            return Response({"error": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-            # Copy cart items into OrderItem records
-            for c_item in cart_items:
-                OrderItem.objects.create(
-                    order=order,
-                    product=c_item.product,
-                    shop=c_item.product.shop,
-                    quantity=c_item.quantity,
-                    unit_price=c_item.unit_price
-                )
-
-            # Clear the buyer's cart
-            cart.items.all().delete()
+        # Clear the buyer's cart
+        cart.items.all().delete()
 
         return Response(OrderSerializer(order).data, status=status.HTTP_201_CREATED)
 
-<<<<<<< HEAD
-    @extend_schema(
-        summary="Cancel Order (Buyer cancel before approval)",
-        responses={200: OrderSerializer}
-    )
-=======
     @extend_schema(summary="Cancel own order (only while pending admin approval)", request=None, responses={200: OrderSerializer})
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel(self, request, pk=None):
         order = self.get_object()
         if order.buyer != request.user and not is_admin(request.user):
-<<<<<<< HEAD
-            return Response({"error": "You do not have permission to cancel this order."}, status=status.HTTP_403_FORBIDDEN)
-        if order.status != 'PENDING_ADMIN_APPROVAL':
-            return Response({"error": f"Cannot cancel order with status '{order.status}'. Only pending orders can be cancelled directly."}, status=status.HTTP_400_BAD_REQUEST)
-        
-        reason = request.data.get('reason', 'Cancelled by buyer.')
-        order.status = 'CANCELLED'
-        order.rejection_reason = reason
-        order.save(update_fields=['status', 'rejection_reason', 'updated_at'])
-        return Response(OrderSerializer(order).data, status=status.HTTP_200_OK)
-
-    @extend_schema(summary="Track parcel for buyer order")
-    @action(detail=True, methods=['get'], url_path='track')
-    def track(self, request, pk=None):
-        order = self.get_object()
-        if order.buyer != request.user and not is_admin(request.user):
-            return Response({"error": "You do not have permission to view tracking for this order."}, status=status.HTTP_403_FORBIDDEN)
-        if not order.pathao_consignment_id:
-            return Response({"error": "This order has not been dispatched to courier yet."}, status=status.HTTP_400_BAD_REQUEST)
-        
-        pathao = PathaoService()
-        tracking_info = pathao.track_consignment(order.pathao_consignment_id)
-        return Response(tracking_info)
-
-=======
             return Response({"error": "You can only cancel your own orders."}, status=status.HTTP_403_FORBIDDEN)
         if order.status != 'PENDING_ADMIN_APPROVAL':
             return Response({"error": "Only orders pending approval can be cancelled. Please contact support."}, status=status.HTTP_400_BAD_REQUEST)
@@ -403,7 +296,6 @@ class OrderViewSet(viewsets.ModelViewSet):
         if not order.pathao_consignment_id:
             return Response({"error": "This order has not been handed over to the courier yet."}, status=status.HTTP_400_BAD_REQUEST)
         return Response(PathaoService().track_consignment(order.pathao_consignment_id))
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 
 @extend_schema(tags=['Orders'])
 class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
@@ -414,33 +306,6 @@ class AdminOrderViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, SearchFilter]
     filterset_fields = ['status', 'payment_status', 'payment_method', 'fulfillment_type']
     search_fields = ['order_number', 'buyer__phone_number', 'contact_phone']
-
-    @extend_schema(
-        summary="List all order item commissions",
-        responses={200: OrderCommissionSerializer(many=True)}
-    )
-    @action(detail=False, methods=['get'], url_path='commissions')
-    def commissions(self, request):
-        queryset = OrderCommission.objects.select_related(
-            'order_item', 'order_item__order', 'order_item__order__buyer',
-            'order_item__shop', 'order_item__product'
-        ).order_by('-created_at')
-
-        search = request.query_params.get('search')
-        if search:
-            queryset = queryset.filter(
-                Q(order_item__order__order_number__icontains=search) |
-                Q(order_item__shop__shop_name__icontains=search) |
-                Q(order_item__product__title__icontains=search)
-            )
-
-        page = self.paginate_queryset(queryset)
-        if page is not None:
-            serializer = OrderCommissionSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-        serializer = OrderCommissionSerializer(queryset, many=True)
-        return Response(serializer.data)
-
 
     @extend_schema(
         summary="Approve Order (Creates VendorOrders, reserves stock, debits commission, optional pickup & delivery overrides)",
@@ -938,35 +803,6 @@ class PathaoWebhookAPIView(views.APIView):
 
 
 @extend_schema(tags=['Orders'])
-<<<<<<< HEAD
-class AdminDeliverySettingsAPIView(views.APIView):
-    permission_classes = [IsAdminOrSuperAdmin]
-    serializer_class = DeliveryChargeSerializer
-
-    def get(self, request):
-        charge = DeliveryCharge.objects.first()
-        if not charge:
-            charge = DeliveryCharge.objects.create(
-                inside_city=Decimal('60.00'),
-                outside_city=Decimal('120.00'),
-                hub_name="Central Warehouse",
-                hub_address="Dhaka Central Hub, Bangladesh",
-                hub_phone="01700000000"
-            )
-        return Response(DeliveryChargeSerializer(charge).data)
-
-    def patch(self, request):
-        charge = DeliveryCharge.objects.first()
-        if not charge:
-            charge = DeliveryCharge.objects.create(
-                inside_city=Decimal('60.00'),
-                outside_city=Decimal('120.00'),
-                hub_name="Central Warehouse",
-                hub_address="Dhaka Central Hub, Bangladesh",
-                hub_phone="01700000000"
-            )
-        serializer = DeliveryChargeSerializer(charge, data=request.data, partial=True)
-=======
 class DeliverySettingsAPIView(views.APIView):
     """Central hub & default delivery charge configuration (singleton)."""
     permission_classes = [IsAdminOrSuperAdmin]
@@ -986,7 +822,6 @@ class DeliverySettingsAPIView(views.APIView):
     @extend_schema(summary="Update delivery & central hub settings", request=DeliveryChargeSerializer)
     def patch(self, request):
         serializer = DeliveryChargeSerializer(self.get_object(), data=request.data, partial=True)
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)

@@ -1,10 +1,6 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-<<<<<<< HEAD
-from .views import AllCategoriesView, PolicyViewSet, AboutUsViewSet, PublicBroadcastAnnouncementViewSet
-=======
-from .views import AllCategoriesView, PolicyViewSet, AboutUsViewSet, MyAnnouncementsAPIView
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
+from .views import AllCategoriesView, PolicyViewSet, AboutUsViewSet, PublicBroadcastAnnouncementViewSet, MyAnnouncementsAPIView
 
 router = DefaultRouter(trailing_slash=False)
 router.register(r'policies', PolicyViewSet, basename='policy')

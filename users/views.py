@@ -17,11 +17,7 @@ from .serializers import (
     UserWithProfileSerializer, BuyerRegisterSerializer, BuyerRegisterVerifySerializer,
     ShippingAddressSerializer, AdminLoginSerializer, PermissionSerializer, RoleSerializer,
     StaffSerializer, StaffCreateSerializer, StaffUpdateSerializer,
-<<<<<<< HEAD
-    ForgotPasswordSerializer, ResetPasswordSerializer
-=======
     MeUpdateSerializer, ChangePasswordSerializer, ForgotPasswordSerializer, ResetPasswordSerializer
->>>>>>> d3f86bdf3dac8fc402d56ff1ebace7e1271c6a92
 )
 from .services import login_user, refresh_tokens, logout_user
 from django.utils import timezone
@@ -284,86 +280,6 @@ class VerifyOTPView(APIView):
                 return Response({'detail': 'Phone number verified successfully.'}, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-
-@extend_schema(
-    tags=['Authentication'],
-    summary="Get or update current logged in user profile",
-)
-class UserMeView(APIView):
-    permission_classes = [IsAuthenticated]
-    parser_classes = (MultiPartParser, FormParser, JSONParser)
-    serializer_class = UserSerializer
-
-    def get(self, request):
-        return Response(UserWithProfileSerializer(request.user).data)
-
-    def patch(self, request):
-        serializer = UserSerializer(request.user, data=request.data, partial=True)
-        if serializer.is_valid():
-            user = serializer.save()
-            return Response(UserWithProfileSerializer(user).data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@extend_schema(
-    tags=['Authentication'],
-    summary="Request password reset OTP",
-    request=ForgotPasswordSerializer,
-)
-class ForgotPasswordView(APIView):
-    permission_classes = [AllowAny]
-    serializer_class = ForgotPasswordSerializer
-
-    def post(self, request):
-        serializer = ForgotPasswordSerializer(data=request.data)
-        if serializer.is_valid():
-            phone_number = serializer.validated_data['phone_number']
-            if not User.objects.filter(phone_number=phone_number).exists():
-                return Response({'error': 'No account found with this phone number.'}, status=status.HTTP_404_NOT_FOUND)
-            
-            otp_code = generate_otp(phone_number)
-            expires_at = timezone.now() + timedelta(minutes=5)
-            OTPVerification.objects.update_or_create(
-                phone_number=phone_number,
-                defaults={
-                    'otp_code': otp_code,
-                    'is_verified': False,
-                    'expires_at': expires_at
-                }
-            )
-            send_otp_sms(phone_number, otp_code)
-            return Response({'message': 'Reset code sent by SMS'}, status=status.HTTP_200_OK)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-@extend_schema(
-    tags=['Authentication'],
-    summary="Reset password with OTP",
-    request=ResetPasswordSerializer,
-)
-class ResetPasswordView(APIView):
-    permission_classes = [AllowAny]
-    serializer_class = ResetPasswordSerializer
-
-    def post(self, request):
-        serializer = ResetPasswordSerializer(data=request.data)
-        if serializer.is_valid():
-            phone_number = serializer.validated_data['phone_number']
-            otp_code = serializer.validated_data['otp_code']
-            new_password = serializer.validated_data['new_password']
-
-            otp_record = OTPVerification.objects.filter(phone_number=phone_number, otp_code=otp_code).first()
-            if not otp_record or otp_record.is_expired():
-                return Response({'error': 'Invalid or expired OTP code.'}, status=status.HTTP_400_BAD_REQUEST)
-
-            try:
-                user = User.objects.get(phone_number=phone_number)
-                user.set_password(new_password)
-                user.save()
-                otp_record.is_verified = True
-                otp_record.save()
-                return Response({'message': 'Password updated successfully. Please sign in.'}, status=status.HTTP_200_OK)
-            except User.DoesNotExist:
-                return Response({'error': 'User not found.'}, status=status.HTTP_404_NOT_FOUND)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 @extend_schema(
     tags=['Authentication'],

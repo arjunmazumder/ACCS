@@ -207,3 +207,120 @@ class OTPLoginTestCase(TestCase):
         code = OTPVerification.objects.get(phone_number='01888888888').otp_code
         self.client.post('/api/auth/buyer/register-verify/', {'phone_number': '01888888888', 'otp_code': code}, format='json')
         self.assertFalse(User.objects.get(phone_number='01888888888').check_password('888888'))
+
+
+class BookCatalogueTestCase(TestCase):
+    """Class/subject tree ordering, multi-value filters, facets and home sections."""
+
+    def setUp(self):
+        self.client = APIClient()
+        seller = User.objects.create_user(phone_number='01891111111', password='password123', is_approved=True, is_phone_verified=True)
+        shop = ShopProfile.objects.create(user=seller, shop_name='Books', shop_address='Dhaka')
+        self.class2 = Category.objects.create(name='Class 2', position=2)
+        self.class10 = Category.objects.create(name='Class 10', position=10)
+        self.math2 = Category.objects.create(name='Mathematics', parent=self.class2, position=1)
+        self.physics10 = Category.objects.create(name='Physics', parent=self.class10, position=1)
+
+        def book(title, cat, publisher, author, **extra):
+            return Product.objects.create(shop=shop, category=cat, title=title, publisher=publisher, author=author,
+                                          price=Decimal('100'), stock_quantity=5, approval_status='APPROVED', **extra)
+
+        book('Math 2', self.math2, 'Alpha Press', 'Rina')
+        book('Physics 10', self.physics10, 'Beta Press', 'Karim', discount_type='PERCENTAGE', discount_value=Decimal('10'))
+        book('Hidden', self.physics10, 'Alpha Press', 'Rina', is_active=False)
+
+    def test_tree_is_ordered_by_position(self):
+        names = [c['name'] for c in self.client.get('/api/products/categories/tree').data]
+        self.assertEqual(names, ['Class 2', 'Class 10'])
+
+    def test_multi_value_filters(self):
+        res = self.client.get(f'/api/products/products?category={self.class2.id},{self.class10.id}')
+        self.assertEqual(res.data['meta']['count'], 2)
+        res = self.client.get('/api/products/products?publisher=Beta Press,Gamma')
+        self.assertEqual([p['title'] for p in res.data['data']], ['Physics 10'])
+        res = self.client.get('/api/products/products?discounted=1')
+        self.assertEqual([p['title'] for p in res.data['data']], ['Physics 10'])
+        res = self.client.get('/api/products/products?search=Karim')
+        self.assertEqual(res.data['meta']['count'], 1)
+
+    def test_facets_ignore_own_selection_and_hidden_books(self):
+        res = self.client.get(f'/api/products/products/facets?category={self.class2.id}&publisher=Alpha Press')
+        publishers = {p['value']: p['count'] for p in res.data['publishers']}
+        self.assertEqual(publishers, {'Alpha Press': 1})  # inactive book not counted
+        counts = {c['id']: c['count'] for c in res.data['categories']}
+        self.assertEqual(counts[self.class2.id], 1)  # class total includes its subjects
+
+    def test_home_sections_group_by_class(self):
+        res = self.client.get('/api/products/products/home-sections?limit=5')
+        self.assertEqual([s['category']['name'] for s in res.data], ['Class 2', 'Class 10'])
+        self.assertEqual(res.data[1]['total'], 1)
+
+
+class MarketingAndEngagementTestCase(TestCase):
+    """Banners, landing pages (guest orders), coupons, wishlist and book reviews."""
+
+    def setUp(self):
+        from marketing.models import Coupon, LandingPage, LandingPageItem
+        self.client = APIClient()
+        seller = User.objects.create_user(phone_number='01892222222', password='password123', is_approved=True, is_phone_verified=True)
+        shop = ShopProfile.objects.create(user=seller, shop_name='Books', shop_address='Dhaka')
+        self.book = Product.objects.create(shop=shop, title='Physics Guide', price=Decimal('500'), stock_quantity=10, approval_status='APPROVED')
+        self.other = Product.objects.create(shop=shop, title='Not in offer', price=Decimal('100'), stock_quantity=10, approval_status='APPROVED')
+        self.page = LandingPage.objects.create(title='SSC Pack', slug='ssc-pack')
+        LandingPageItem.objects.create(landing_page=self.page, product=self.book, is_preselected=True)
+        Coupon.objects.create(code='save50', discount_type='FLAT', value=Decimal('50'), min_order_amount=Decimal('400'), usage_limit=1)
+        User.objects.create_superuser(phone_number='01893333333', password='password123')
+
+    def login(self, phone, path='/api/auth/login/'):
+        res = self.client.post(path, {'phone_number': phone, 'password': 'password123'}, format='json')
+        self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
+
+    def test_guest_landing_order_creates_buyer_and_applies_coupon_once(self):
+        payload = {'items': [{'product_id': self.book.id, 'quantity': 1}], 'full_name': 'Guest Buyer',
+                   'phone_number': '01894444444', 'address': 'House 1, Dhaka', 'coupon_code': 'SAVE50'}
+        res = self.client.post('/api/marketing/landing/ssc-pack/order/', payload, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertTrue(res.data['account_created'])
+        order = res.data['order']
+        self.assertEqual(order['source'], 'LANDING')
+        self.assertEqual(Decimal(str(order['discount_amount'])), Decimal('50'))
+        self.assertEqual(Decimal(str(order['grand_total'])), Decimal('500') + Decimal(str(order['total_delivery_charge'])) - Decimal('50'))
+        # usage limit reached
+        payload['phone_number'] = '01895555555'
+        self.assertEqual(self.client.post('/api/marketing/landing/ssc-pack/order/', payload, format='json').status_code, 400)
+
+    def test_landing_order_rejects_products_outside_the_page(self):
+        payload = {'items': [{'product_id': self.other.id, 'quantity': 1}], 'full_name': 'X',
+                   'phone_number': '01896666666', 'address': 'Dhaka'}
+        self.assertEqual(self.client.post('/api/marketing/landing/ssc-pack/order/', payload, format='json').status_code, 400)
+
+    def test_admin_manages_landing_pages_and_banners(self):
+        self.assertEqual(self.client.get('/api/marketing/landing-pages/').status_code, 401)
+        self.login('01893333333', '/api/admin/login/')
+        res = self.client.post('/api/marketing/landing-pages/', {'title': 'Eid Offer', 'product_ids': [self.other.id, self.book.id],
+                                                                 'preselected_ids': [self.book.id]}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        self.assertEqual(res.data['slug'], 'eid-offer')
+        self.assertEqual([i['product']['id'] for i in res.data['items']], [self.other.id, self.book.id])
+        self.assertEqual(self.client.get('/api/marketing/landing/eid-offer/').status_code, 200)
+        self.assertEqual(self.client.get('/api/marketing/banners/').status_code, 200)
+
+    def test_coupon_validation(self):
+        res = self.client.post('/api/marketing/coupons/validate/', {'code': 'SAVE50', 'subtotal': '300'}, format='json')
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post('/api/marketing/coupons/validate/', {'code': 'save50', 'subtotal': '450'}, format='json')
+        self.assertEqual(Decimal(str(res.data['discount'])), Decimal('50'))
+
+    def test_wishlist_and_reviews_require_purchase(self):
+        buyer = User.objects.create_user(phone_number='01897777777', password='password123', is_approved=True, is_phone_verified=True)
+        self.login('01897777777')
+        self.client.post('/api/products/wishlist', {'product_id': self.book.id}, format='json')
+        self.assertEqual(self.client.get('/api/products/wishlist').data['ids'], [self.book.id])
+        review = {'product': self.book.id, 'rating': 5, 'comment': 'Great'}
+        self.assertEqual(self.client.post('/api/products/reviews', review, format='json').status_code, 403)
+        from orders.models import Order, OrderItem
+        order = Order.objects.create(buyer=buyer, shipping_address='Dhaka', contact_phone='01897777777', status='DELIVERED')
+        OrderItem.objects.create(order=order, product=self.book, shop=self.book.shop, quantity=1, unit_price=Decimal('500'))
+        self.assertEqual(self.client.post('/api/products/reviews', review, format='json').status_code, 201)
+        self.book.refresh_from_db()
+        self.assertEqual((self.book.rating_avg, self.book.rating_count), (5.0, 1))

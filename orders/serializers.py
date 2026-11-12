@@ -131,7 +131,12 @@ class OrderSerializer(serializers.ModelSerializer):
             'payment_status',
             'total_amount',
             'total_delivery_charge',
+            'discount_amount',
+            'coupon_code',
             'grand_total',
+            'source',
+            'landing_page',
+            'customer_note',
             'fulfillment_type',
             'rejection_reason',
             
@@ -176,7 +181,8 @@ class OrderSerializer(serializers.ModelSerializer):
             'buyer', 'order_number', 'total_amount', 'total_delivery_charge', 
             'fulfillment_type', 'status', 'payment_status', 'rejection_reason',
             'pathao_consignment_id', 'pathao_tracking_code', 'pathao_delivery_fee',
-            'pathao_order_status', 'is_restocked', 'restocked_at', 'created_at', 'updated_at'
+            'pathao_order_status', 'is_restocked', 'restocked_at', 'created_at', 'updated_at',
+            'discount_amount', 'coupon_code', 'source', 'landing_page'
         ]
 
     def get_delivery_charge_breakdown(self, obj):
@@ -195,7 +201,7 @@ class OrderSerializer(serializers.ModelSerializer):
         return breakdown
 
     def get_grand_total(self, obj):
-        return obj.total_amount + obj.total_delivery_charge
+        return obj.total_amount + obj.total_delivery_charge - (obj.discount_amount or 0)
 
 
 from vendors.models import City
@@ -208,6 +214,8 @@ class CheckoutSerializer(serializers.Serializer):
     pathao_recipient_zone_id = serializers.IntegerField(required=False, allow_null=True, help_text="Pathao Zone ID (e.g. 101 for Dhanmondi)")
     pathao_recipient_area_id = serializers.IntegerField(required=False, allow_null=True, help_text="Pathao Area ID")
     payment_method = serializers.ChoiceField(choices=Order.PAYMENT_METHOD_CHOICES, default='COD')
+    coupon_code = serializers.CharField(required=False, allow_blank=True, help_text='Optional discount coupon')
+    note = serializers.CharField(required=False, allow_blank=True, help_text='Note for the seller / courier')
 
 class AdminOrderApproveSerializer(serializers.Serializer):
     # Pickup Overrides
