@@ -15,10 +15,38 @@ class Category(models.Model):
         verbose_name_plural = "Categories"
         ordering = ['position', 'name']
 
+    MAX_DEPTH = 3  # category -> sub-category -> sub-sub-category
+
     def __str__(self):
         if self.parent:
             return f"{self.parent.name} -> {self.name}"
         return self.name
+
+    @property
+    def ancestors(self):
+        """Parent chain from the top-level category down to the direct parent."""
+        chain, node, seen = [], self.parent, set()
+        while node is not None and node.pk not in seen:
+            seen.add(node.pk)
+            chain.append(node)
+            node = node.parent
+        return chain[::-1]
+
+    @property
+    def depth(self):
+        """1 for a top-level category, 2 for a sub-category, 3 for a sub-sub-category."""
+        return len(self.ancestors) + 1
+
+    @staticmethod
+    def family_ids(ids):
+        """The given category ids plus every descendant, at any depth."""
+        family = {int(i) for i in ids}
+        frontier = set(family)
+        while frontier:
+            children = set(Category.objects.filter(parent_id__in=frontier).values_list('id', flat=True)) - family
+            family |= children
+            frontier = children
+        return family
 
 
 class Product(models.Model):
@@ -43,6 +71,10 @@ class Product(models.Model):
     author = models.CharField(max_length=255, blank=True, null=True, help_text="Book author / writer")
     publisher = models.CharField(max_length=255, blank=True, null=True, help_text="Book publisher (prokashoni)")
     description = models.TextField(blank=True, null=True)
+    preview_pdf = models.FileField(
+        upload_to='product_previews/', blank=True, null=True,
+        help_text='A few sample pages (PDF) that shoppers can read on the product page. Visible to everyone.',
+    )
     size = models.CharField(max_length=50, blank=True, null=True, help_text="Size of the product (e.g., M, L, XL, 42, 44)")
     
     stock_quantity = models.IntegerField(default=0)

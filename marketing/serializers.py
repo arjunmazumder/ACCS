@@ -1,9 +1,11 @@
+import re
+
 from django.utils.text import slugify
 from rest_framework import serializers
 
 from products.models import Product
 from products.serializers import ProductImageSerializer
-from .models import Banner, Coupon, LandingPage, LandingPageItem
+from .models import Banner, Coupon, LandingPage, LandingPageItem, SiteSettings
 
 
 class BannerSerializer(serializers.ModelSerializer):
@@ -154,3 +156,22 @@ class CouponSerializer(serializers.ModelSerializer):
 class CouponValidateSerializer(serializers.Serializer):
     code = serializers.CharField()
     subtotal = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class SiteSettingsSerializer(serializers.ModelSerializer):
+    whatsapp_url = serializers.CharField(read_only=True)
+
+    class Meta:
+        model = SiteSettings
+        exclude = ['id']
+        read_only_fields = ['updated_at']
+
+    def validate_whatsapp_number(self, value):
+        digits = re.sub(r'\D', '', value or '')
+        if not digits:
+            return ''
+        if digits.startswith('01') and len(digits) == 11:  # local Bangladeshi mobile number
+            digits = f'88{digits}'
+        if not 10 <= len(digits) <= 15:
+            raise serializers.ValidationError('Enter a valid WhatsApp number, e.g. 01712345678 or 8801712345678.')
+        return digits

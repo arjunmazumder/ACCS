@@ -25,6 +25,7 @@ from datetime import timedelta
 from django.db.models import Q
 from .models import User, OTPVerification, KYCProfile, ShippingAddress
 from django.conf import settings
+from django.core.cache import cache
 from .utils import generate_otp, send_otp_sms, send_password_sms
 from lookup.models import Lookup
 from lookup.serializers import LookupSerializer
@@ -47,6 +48,65 @@ def set_auth_cookies(response, access_token, refresh_token):
         samesite='Lax',
         max_age=settings.JWT_REFRESH_EXPIRATION_DAYS * 24 * 60 * 60
     )
+
+# --- Super admin sign-in: password + SMS code ---
+LOGIN_OTP_MINUTES = 5
+LOGIN_OTP_MAX_ATTEMPTS = 5
+
+
+def needs_login_otp(user):
+    return user.is_superuser and getattr(settings, 'SUPERADMIN_LOGIN_OTP', True)
+
+
+def _mask_phone(phone):
+    return phone[:3] + '*' * max(len(phone) - 6, 0) + phone[-3:]
+
+
+def login_otp_step(request, user):
+    """
+    Second factor for super admins. Call after the password was checked.
+    Without `otp_code` in the request it texts a fresh code and returns an "otp_required" response;
+    with a wrong code it returns an error. Returns None when the code is correct (sign the user in).
+    """
+    phone = user.phone_number
+    fails_key = f'login-otp-fails:{phone}'
+    code = str(request.data.get('otp_code') or '').strip()
+
+    if not code:
+        otp_code = generate_otp(phone)
+        OTPVerification.objects.update_or_create(
+            phone_number=phone,
+            defaults={'otp_code': otp_code, 'is_verified': False,
+                      'expires_at': timezone.now() + timedelta(minutes=LOGIN_OTP_MINUTES)}
+        )
+        cache.delete(fails_key)
+        if not send_otp_sms(phone, otp_code):
+            return Response({'detail': 'Could not send the login code. Please try again.'},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response({
+            'status': 'otp_required',
+            'message': 'Enter the 6-digit code we sent to your phone.',
+            'data': {'phone_hint': _mask_phone(phone), 'expires_in': LOGIN_OTP_MINUTES * 60},
+        }, status=status.HTTP_200_OK)
+
+    record = OTPVerification.objects.filter(phone_number=phone).first()
+    if not record or record.is_verified or record.is_expired():
+        return Response({'detail': 'The code has expired. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if not secrets.compare_digest(record.otp_code, code):
+        fails = cache.get(fails_key, 0) + 1
+        cache.set(fails_key, fails, LOGIN_OTP_MINUTES * 60)
+        if fails >= LOGIN_OTP_MAX_ATTEMPTS:
+            record.delete()
+            cache.delete(fails_key)
+            return Response({'detail': 'Too many wrong codes. Please request a new one.'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'detail': 'Invalid code.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    record.is_verified = True
+    record.save(update_fields=['is_verified'])
+    cache.delete(fails_key)
+    return None
+
 
 @extend_schema(
     tags=['Authentication'],
@@ -127,6 +187,10 @@ class LoginView(APIView):
         serializer = LoginSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.validated_data['user']
+            if needs_login_otp(user):
+                otp_response = login_otp_step(request, user)
+                if otp_response is not None:
+                    return otp_response
             access_token, refresh_token = login_user(user)
             
             response_data = {
@@ -256,7 +320,8 @@ class VerifyOTPView(APIView):
                 user.is_phone_verified = True
                 user.save()
                 
-                if user.is_approved:
+                # Super admins only get signed in through password + code
+                if user.is_approved and not needs_login_otp(user):
                     access_token, refresh_token = login_user(user)
                     response_data = {
                         "status": "success",
@@ -551,6 +616,10 @@ class AdminLoginView(APIView):
         serializer = AdminLoginSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.validated_data['user']
+            if needs_login_otp(user):
+                otp_response = login_otp_step(request, user)
+                if otp_response is not None:
+                    return otp_response
             access_token, refresh_token = login_user(user)
             
             response_data = {
@@ -709,6 +778,8 @@ class LoginOTPView(APIView):
             return Response({'detail': 'No account found with this phone number. Please sign up first.'}, status=status.HTTP_404_NOT_FOUND)
         if not user.is_active:
             return Response({'detail': 'Your account has been suspended.'}, status=status.HTTP_403_FORBIDDEN)
+        if needs_login_otp(user):
+            return Response({'detail': 'Super admins must sign in with their password.'}, status=status.HTTP_403_FORBIDDEN)
 
         otp_code = generate_otp(phone_number)
         OTPVerification.objects.update_or_create(

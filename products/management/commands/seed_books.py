@@ -1,6 +1,7 @@
 """
 Seed the catalogue as a school book shop: Class 1-12 categories, subject
-sub-categories, sample books with generated cover images and two book sellers.
+sub-categories, sample books with generated cover images, a three-level
+Stationery department with sample items, and two book sellers.
 
     python manage.py seed_books            # add / update books
     python manage.py seed_books --reset    # also remove non-book categories and hide other products
@@ -130,9 +131,9 @@ def make_cover(subject, level, book_type, publisher):
 
 
 BANNERS = [
-    ('Back to school 2026', 'Every Class 1–12 book in one place', 'Shop now', '/products', ((188, 42, 42), (230, 78, 77))),
-    ('Up to 25% off', 'Guides & model tests on offer this week', 'View offers', '/products?discounted=1', ((21, 101, 192), (66, 133, 244))),
-    ('SSC & HSC preparation', 'Physics, Chemistry, Biology & Higher Math', 'Explore', '/products?ordering=-created_at', ((27, 94, 32), (67, 160, 71))),
+    ('Back to school 2026', 'Every Class 1–12 book in one place', 'Shop now', '/products', ((110, 10, 59), (204, 0, 102))),
+    ('Up to 25% off', 'Guides & model tests on offer this week', 'View offers', '/products?discounted=1', ((178, 74, 10), (248, 150, 30))),
+    ('SSC & HSC preparation', 'Physics, Chemistry, Biology & Higher Math', 'Explore', '/products?ordering=-created_at', ((25, 23, 26), (110, 10, 59))),
 ]
 
 
@@ -152,6 +153,141 @@ def make_banner(title, subtitle, colours, covers):
         img.paste(thumb, (1040 + i * 150, 70 + abs(i - 1) * 30), thumb)
     buf = io.BytesIO()
     img.save(buf, format='JPEG', quality=88)
+    return buf.getvalue()
+
+
+# Stationery department: sub-category -> sub-sub-category -> items (title, brand, price, picture, colour)
+STATIONERY = [
+    ('Pens & Pencils', [
+        ('Ball Pens', [('Ball Pen — Blue, Pack of 10', 'Inkline', 100, 'pen', (21, 101, 192)),
+                       ('Ball Pen — Black, Pack of 10', 'Inkline', 100, 'pen', (38, 38, 38))]),
+        ('Gel Pens', [('Gel Pen — Assorted, Pack of 5', 'Smoothy', 150, 'pen', (106, 27, 154))]),
+        ('Pencils', [('HB Pencil — Pack of 12', 'Lekhoni', 120, 'pencil', (230, 145, 20)),
+                     ('2B Drawing Pencil — Pack of 6', 'Lekhoni', 90, 'pencil', (198, 40, 40))]),
+    ]),
+    ('Khata & Notebooks', [
+        ('Khata', [('Ruled Khata — 200 pages', 'Patabahar', 80, 'notebook', (0, 131, 143)),
+                   ('Math Khata, Square Grid — 120 pages', 'Patabahar', 70, 'notebook', (46, 125, 50))]),
+        ('Spiral Notebooks', [('Spiral Notebook A5 — 160 pages', 'PageCraft', 140, 'spiral', (204, 0, 102))]),
+    ]),
+    ('Geometry & Math', [
+        ('Geometry Boxes', [('Geometry Box — 9 pieces', 'Rekha', 250, 'box', (40, 53, 147))]),
+        ('Calculators', [('Scientific Calculator — 240 functions', 'Gonok', 1350, 'calculator', (55, 71, 79))]),
+    ]),
+    ('Art & Colour', [
+        ('Colour Pencils', [('Colour Pencils — 24 shades', 'Rangdhanu', 220, 'colours', (198, 40, 40))]),
+        ('Crayons', [('Wax Crayons — 12 colours', 'Rangdhanu', 90, 'crayons', (245, 124, 0))]),
+    ]),
+    ('Bags & Bottles', [
+        ('School Bags', [('School Backpack — 18 inch', 'Pathik', 1450, 'bag', (204, 0, 102))]),
+        ('Water Bottles', [('Water Bottle — 600 ml', 'Pathik', 320, 'bottle', (0, 105, 92))]),
+    ]),
+]
+RAINBOW = [(229, 57, 53), (251, 140, 0), (253, 216, 53), (67, 160, 71), (30, 136, 229), (94, 53, 177), (216, 27, 96)]
+
+
+def _shade(colour, delta):
+    return tuple(max(0, min(255, c + delta)) for c in colour)
+
+
+def _stick(length, thickness, colour, tip, end=None):
+    """A horizontal pen / pencil drawn on its own transparent layer (rotated by the caller)."""
+    layer = Image.new('RGBA', (length + 40, thickness + 40), (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    y0, y1 = 20, 20 + thickness
+    body_end = length - 70
+    if end:
+        d.rounded_rectangle((20, y0, 70, y1), radius=thickness // 3, fill=end)
+        d.rectangle((62, y0, 84, y1), fill=(189, 189, 189))
+    d.rectangle((84 if end else 20, y0, body_end, y1), fill=colour)
+    d.rectangle((84 if end else 20, y0, body_end, y0 + thickness // 4), fill=_shade(colour, 40))
+    d.polygon([(body_end, y0), (body_end, y1), (length + 20, (y0 + y1) // 2)], fill=tip)
+    d.polygon([(length - 10, (y0 + y1) // 2 - 7), (length - 10, (y0 + y1) // 2 + 7), (length + 20, (y0 + y1) // 2)], fill=(60, 60, 60))
+    return layer
+
+
+def _paste_rotated(img, layer, angle, centre):
+    rotated = layer.rotate(angle, expand=True, resample=Image.BICUBIC)
+    img.alpha_composite(rotated, (centre[0] - rotated.width // 2, centre[1] - rotated.height // 2))
+
+
+def make_stationery(kind, colour, title, brand):
+    """Simple product artwork for a stationery item (600x800 PNG)."""
+    w, h = 600, 800
+    bg = _shade(colour, 0)
+    bg = tuple(round(c * 0.12 + 255 * 0.88) for c in bg)
+    img = Image.new('RGBA', (w, h), bg + (255,))
+    d = ImageDraw.Draw(img)
+    d.ellipse((300, -140, 760, 300), fill=tuple(round(c * 0.2 + 255 * 0.8) for c in colour) + (255,))
+    d.ellipse((-180, 440, 220, 840), fill=tuple(round(c * 0.16 + 255 * 0.84) for c in colour) + (255,))
+    cx, cy = 300, 330
+    dark = _shade(colour, -45)
+
+    if kind == 'pen':
+        for i, off in enumerate((-70, 0, 70)):
+            _paste_rotated(img, _stick(420, 34, colour if i != 1 else dark, (210, 210, 210)), 35, (cx + off, cy + off // 3))
+    elif kind == 'pencil':
+        for i, off in enumerate((-80, 0, 80)):
+            _paste_rotated(img, _stick(420, 38, colour, (240, 205, 160), end=(244, 143, 177)), 35, (cx + off, cy + off // 3))
+    elif kind == 'colours' or kind == 'crayons':
+        thickness = 30 if kind == 'colours' else 44
+        # Upright, slightly fanned row of pencils / crayons
+        for i, c in enumerate(RAINBOW):
+            k = i - 3
+            layer = _stick(360 if kind == 'colours' else 260, thickness, c, (240, 205, 160) if kind == 'colours' else _shade(c, -30))
+            _paste_rotated(img, layer, 90 - k * 7, (cx + k * (thickness + 12), cy + 20 + abs(k) * 12))
+    elif kind in ('notebook', 'spiral'):
+        d.rounded_rectangle((165, 150, 445, 520), radius=14, fill=_shade(colour, -30))
+        d.rounded_rectangle((150, 135, 430, 505), radius=14, fill=colour)
+        d.rounded_rectangle((200, 210, 390, 300), radius=8, fill=(255, 255, 255))
+        for y in (238, 258, 278):
+            d.line((215, y, 375, y), fill=_shade(colour, 60), width=3)
+        if kind == 'spiral':
+            for y in range(160, 500, 28):
+                d.ellipse((136, y, 164, y + 16), outline=(90, 90, 90), width=4)
+        else:
+            d.rectangle((150, 135, 172, 505), fill=dark)
+    elif kind == 'box':
+        d.rounded_rectangle((120, 190, 480, 470), radius=18, fill=colour)
+        d.rounded_rectangle((120, 190, 480, 250), radius=18, fill=dark)
+        d.pieslice((200, 280, 400, 480), 180, 360, fill=(255, 255, 255))
+        d.pieslice((235, 315, 365, 445), 180, 360, fill=colour)
+        d.rectangle((150, 395, 450, 425), fill=(255, 236, 179))
+        for x in range(160, 445, 18):
+            d.line((x, 395, x, 405 if (x // 18) % 2 else 412), fill=(120, 90, 40), width=2)
+    elif kind == 'calculator':
+        d.rounded_rectangle((170, 120, 430, 540), radius=26, fill=colour)
+        d.rounded_rectangle((200, 155, 400, 235), radius=8, fill=(200, 230, 201))
+        d.text((385, 195), '3.1416', font=_font(34), fill=(40, 60, 40), anchor='rm')
+        for r in range(5):
+            for c in range(4):
+                x, y = 200 + c * 52, 260 + r * 54
+                key = (255, 112, 67) if (r, c) == (4, 3) else (236, 239, 241)
+                d.rounded_rectangle((x, y, x + 40, y + 40), radius=8, fill=key)
+    elif kind == 'bag':
+        d.arc((235, 90, 365, 200), 180, 360, fill=dark, width=18)
+        d.rounded_rectangle((150, 150, 450, 540), radius=60, fill=colour)
+        d.rounded_rectangle((195, 330, 405, 500), radius=30, fill=dark)
+        d.line((215, 360, 385, 360), fill=(255, 214, 0), width=6)
+        d.rectangle((285, 170, 315, 320), fill=_shade(colour, 35))
+    elif kind == 'bottle':
+        d.rounded_rectangle((250, 105, 350, 165), radius=12, fill=dark)
+        d.rounded_rectangle((215, 150, 385, 540), radius=50, fill=colour)
+        d.rectangle((215, 300, 385, 400), fill=(255, 255, 255))
+        d.text((300, 350), brand.upper(), font=_font(30), fill=colour, anchor='mm')
+        d.rounded_rectangle((235, 180, 255, 280), radius=10, fill=_shade(colour, 50))
+
+    # Name strip
+    d.rectangle((0, h - 190, w, h), fill=(255, 255, 255, 255))
+    lines = _wrap(d, title, _font(32), w - 80)[:2]
+    y = h - 170
+    for line in lines:
+        d.text((40, y), line, font=_font(32), fill=(25, 23, 26))
+        y += 42
+    d.text((40, h - 52), brand.upper(), font=_font(24), fill=dark)
+
+    buf = io.BytesIO()
+    img.convert('RGB').save(buf, format='PNG', optimize=True)
     return buf.getvalue()
 
 
@@ -209,19 +345,56 @@ class Command(BaseCommand):
                             image=ContentFile(make_cover(subject, level, book_type, publisher), name=f'book-{product.id}.png'),
                         )
 
+        stationery, stationery_new = self._stationery(shops[0], rng)
         self._marketing(class_ids)
 
         if options['reset']:
-            removed, _ = Category.objects.filter(parent__isnull=True).exclude(id__in=class_ids).delete()
+            keep_roots = class_ids + [stationery.id]
+            removed, _ = Category.objects.filter(parent__isnull=True).exclude(id__in=keep_roots).delete()
             hidden = (Product.objects.filter(is_active=True)
-                      .exclude(category__parent_id__in=class_ids).exclude(category_id__in=class_ids)
+                      .exclude(category_id__in=Category.family_ids(keep_roots))
                       .update(is_active=False))
             self.stdout.write(f'Reset: removed {removed} non-book category rows, hid {hidden} non-book products.')
 
         self.stdout.write(self.style.SUCCESS(
             f'Book catalogue ready: 12 classes, {Category.objects.filter(parent_id__in=class_ids).count()} subjects, '
-            f'{created} new books. Seller logins: 01744444444 / 01755555555 (password 12345678).'
+            f'{created} new books, {stationery_new} new stationery items. Seller logins: 01744444444 / 01755555555 (password 12345678).'
         ))
+
+    def _stationery(self, shop, rng):
+        """Stationery department, three levels deep: Stationery -> Pens & Pencils -> Ball Pens -> items."""
+        root, _ = Category.objects.get_or_create(name='Stationery', parent=None)
+        root.position = 100
+        root.description = 'খাতা, কলম ও স্কুলের প্রয়োজনীয় সব জিনিস'
+        root.save()
+        created = 0
+        for pos, (group, types) in enumerate(STATIONERY, start=1):
+            sub, _ = Category.objects.get_or_create(name=group, parent=root)
+            Category.objects.filter(pk=sub.pk).update(position=pos)
+            for tpos, (type_name, items) in enumerate(types, start=1):
+                leaf, _ = Category.objects.get_or_create(name=type_name, parent=sub)
+                Category.objects.filter(pk=leaf.pk).update(position=tpos)
+                for title, brand, price, kind, colour in items:
+                    discount = rng.choice([0, 0, 10, 15])
+                    product, is_new = Product.objects.get_or_create(
+                        shop=shop, title=title,
+                        defaults={
+                            'category': leaf, 'publisher': brand, 'price': Decimal(price),
+                            'stock_quantity': rng.choice([15, 30, 50, 80]), 'low_stock_threshold': 5, 'moq': 1,
+                            'discount_type': 'PERCENTAGE' if discount else 'NONE',
+                            'discount_value': Decimal(discount) if discount else None,
+                            'woner_commission': Decimal(0), 'approval_status': 'APPROVED', 'is_active': True,
+                            'description': f'{title} by {brand}. Good quality {type_name.lower()} for school and home — '
+                                           f'part of our {group.lower()} range.',
+                        },
+                    )
+                    created += int(is_new)
+                    if not product.images.exists():
+                        ProductImage.objects.create(
+                            product=product, is_primary=True,
+                            image=ContentFile(make_stationery(kind, colour, title, brand), name=f'stationery-{product.id}.png'),
+                        )
+        return root, created
 
     def _sellers(self):
         role, _ = Lookup.objects.get_or_create(name='ROLE', value='RETAILER', defaults={'is_active': True})

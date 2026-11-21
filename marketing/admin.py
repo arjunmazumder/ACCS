@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Banner, Coupon, LandingPage, LandingPageItem
+from .models import Banner, Coupon, LandingPage, LandingPageItem, SiteSettings
 
 
 class LandingPageItemInline(admin.TabularInline):
@@ -18,3 +18,4 @@ class LandingPageAdmin(admin.ModelAdmin):
 
 admin.site.register(Banner)
 admin.site.register(Coupon)
+admin.site.register(SiteSettings)

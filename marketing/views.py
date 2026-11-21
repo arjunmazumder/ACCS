@@ -14,9 +14,10 @@ from orders.serializers import OrderSerializer
 from orders.services.checkout import CheckoutError, place_order, resolve_coupon
 from users.models import User
 from users.permissions import IsAdminOrReadOnly, IsAdminOrSuperAdmin
-from .models import Banner, Coupon, LandingPage
+from .models import Banner, Coupon, LandingPage, SiteSettings
 from .serializers import (
     BannerSerializer, CouponSerializer, CouponValidateSerializer, LandingOrderSerializer, LandingPageSerializer,
+    SiteSettingsSerializer,
 )
 
 
@@ -147,3 +148,19 @@ class CouponValidateView(APIView):
         except CheckoutError as exc:
             return Response({'valid': False, 'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({'valid': True, 'code': coupon.code, 'discount': discount, 'description': coupon.description})
+
+
+@extend_schema(tags=['Marketing'], summary='Storefront contact details (WhatsApp button, hotline)', request=SiteSettingsSerializer, responses=SiteSettingsSerializer)
+class SiteSettingsView(APIView):
+    """Anyone can read; admins (or staff with the site settings permission) can update."""
+    permission_classes = [IsAdminOrReadOnly]
+    permission_model = SiteSettings
+
+    def get(self, request):
+        return Response(SiteSettingsSerializer(SiteSettings.load()).data)
+
+    def patch(self, request):
+        serializer = SiteSettingsSerializer(SiteSettings.load(), data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)

@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     'orders',
     'wallets',
     'marketing',
+    'finance',
     'django_filters',
 ]
 
@@ -204,6 +205,9 @@ CORS_ALLOW_CREDENTIALS = True
 AUTOMAS_SMS_API_KEY = os.environ.get('AUTOMAS_SMS_API_KEY', '')
 AUTOMAS_SMS_SENDER_ID = os.environ.get('AUTOMAS_SMS_SENDER_ID', '')
 AUTOMAS_SMS_URL = os.environ.get('AUTOMAS_SMS_URL', 'https://api.automas.com.bd/smsapiv3')
+
+# Super admins must also enter a code sent by SMS when they sign in with their password
+SUPERADMIN_LOGIN_OTP = os.environ.get('SUPERADMIN_LOGIN_OTP', 'True').lower() in ('true', '1', 't')
 
 # Never send real SMS while running the test suite
 import sys

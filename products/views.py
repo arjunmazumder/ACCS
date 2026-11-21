@@ -15,7 +15,7 @@ from .serializers import (
     CategorySerializer, CategoryTreeSerializer,
     ProductSerializer, ProductImageSerializer, ProductRejectSerializer, ProductReviewSerializer
 )
-from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin, IsAdminOrReadOnly
+from users.permissions import AdminBypassPermission, IsAdminOrSuperAdmin, IsAdminOrReadOnly, staff_has_model_permission
 
 def is_admin(user):
     if not user or not user.is_authenticated:
@@ -30,7 +30,13 @@ class IsProductOwnerOrReadOnly(AdminBypassPermission):
     """
     Anyone can read. Writes require a vendor with a shop profile (or admin).
     Object-level writes are limited to the product's own shop owner.
+    Staff writes need the matching product permission (superusers / ADMIN role bypass).
     """
+    def has_permission(self, request, view):
+        if request.method not in permissions.SAFE_METHODS and self.is_admin(request):
+            return staff_has_model_permission(request, view)
+        return super().has_permission(request, view)
+
     def has_custom_permission(self, request, view):
         if request.method in permissions.SAFE_METHODS:
             return True
@@ -105,7 +111,8 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         categories = [c for c in self._csv(params.get('category')) if c.isdigit()]
         if categories and 'category' not in skip:
-            queryset = queryset.filter(Q(category_id__in=categories) | Q(category__parent_id__in=categories))
+            # A category also matches everything below it (sub- and sub-sub-categories)
+            queryset = queryset.filter(category_id__in=Category.family_ids(categories))
 
         for field in ('publisher', 'author'):
             values = self._csv(params.get(field))
@@ -146,11 +153,15 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         category_rows = (self._apply_filters(searched, skip={'category'})
                          .exclude(category__isnull=True).values('category').annotate(count=Count('id')))
+        # Each product counts towards its own category and every ancestor above it
+        parents = dict(Category.objects.values_list('id', 'parent_id'))
         category_counts = {}
         for row in category_rows:
-            category_counts[row['category']] = category_counts.get(row['category'], 0) + row['count']
-        for cat in Category.objects.filter(id__in=category_counts.keys(), parent__isnull=False).values('id', 'parent_id'):
-            category_counts[cat['parent_id']] = category_counts.get(cat['parent_id'], 0) + category_counts[cat['id']]
+            node, seen = row['category'], set()
+            while node is not None and node not in seen:
+                seen.add(node)
+                category_counts[node] = category_counts.get(node, 0) + row['count']
+                node = parents.get(node)
 
         return Response({
             'categories': [{'id': k, 'count': v} for k, v in category_counts.items()],
@@ -168,7 +179,7 @@ class ProductViewSet(viewsets.ModelViewSet):
         public = self.public_queryset()
         sections = []
         for category in Category.objects.filter(parent__isnull=True).order_by('position', 'name'):
-            products = public.filter(Q(category=category) | Q(category__parent=category))
+            products = public.filter(category_id__in=Category.family_ids([category.id]))
             total = products.count()
             if not total:
                 continue
@@ -181,12 +192,12 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     def public_queryset(self):
         """What every shopper sees: active, approved products from unblocked shops."""
-        return (Product.objects.select_related('shop', 'category', 'shop__city').prefetch_related('images')
+        return (Product.objects.select_related('shop', 'category__parent__parent', 'shop__city').prefetch_related('images')
                 .filter(is_active=True, approval_status='APPROVED', shop__is_blocked=False).order_by('-created_at'))
 
     def get_queryset(self):
         user = self.request.user
-        base_qs = Product.objects.select_related('shop', 'category', 'shop__city').prefetch_related('images')
+        base_qs = Product.objects.select_related('shop', 'category__parent__parent', 'shop__city').prefetch_related('images')
         
         # If Admin, allow viewing all products or filtering by query params
         if is_admin(user):
@@ -256,17 +267,16 @@ class ProductViewSet(viewsets.ModelViewSet):
 
         if is_admin(user):
             # If Admin or authorized Staff posts, allow selecting a specific shop or fallback
-            shop_id = self.request.data.get('shop') or self.request.data.get('shop_id')
+            # Admins pick the shop that sells the product (or use their own shop, if they have one)
+            shop_id = str(self.request.data.get('shop') or self.request.data.get('shop_id') or '').strip()
             if shop_id:
-                shop = ShopProfile.objects.filter(id=shop_id).first()
+                shop = ShopProfile.objects.filter(id=shop_id).first() if shop_id.isdigit() else None
                 if not shop:
-                    raise exceptions.ValidationError({"error": f"Shop with id {shop_id} does not exist."})
+                    raise exceptions.ValidationError({"shop": [f"Shop with id {shop_id} does not exist."]})
             elif hasattr(user, 'vendor_shop_profile'):
                 shop = user.vendor_shop_profile
             else:
-                shop = ShopProfile.objects.first()
-                if not shop:
-                    raise exceptions.ValidationError({"error": "No shop exists in the system to assign product to."})
+                raise exceptions.ValidationError({"shop": ["Choose the shop this product belongs to."]})
 
             # Products created by Superadmin / Staff / Admin are automatically APPROVED and published directly
             serializer.save(shop=shop, approval_status='APPROVED')
@@ -331,6 +341,7 @@ class ProductImageViewSet(viewsets.ModelViewSet):
     queryset = ProductImage.objects.all()
     serializer_class = ProductImageSerializer
     permission_classes = [IsProductOwnerOrReadOnly]
+    permission_model = Product  # staff manage images with the product permissions
     parser_classes = (MultiPartParser, FormParser)
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['product']

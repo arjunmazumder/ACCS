@@ -327,9 +327,15 @@ Saved shipping address for the logged-in Buyer. Fully integrated with **Pathao C
 
 ### 4.4 Create Product (Vendor or Admin)
 * **Endpoint:** `POST /api/products/products/`
-* **Access:** Authenticated Vendor or Admin
+* **Access:** Authenticated Vendor or Admin (staff need the `add_product` permission)
 * **Content-Type:** `multipart/form-data`
+* **Vendor:** the product goes to the vendor's own shop as `PENDING` (or `APPROVED` with auto-approve permission).
+* **Admin:** send `shop` (shop ID) to choose the selling shop; required unless the admin owns a shop. Admin products are `APPROVED` straight away.
 * **Request Form-Data:**
+  * `shop` (*Admin only, Integer*): Shop that sells the product
+  * `preview_pdf` (*Optional, File*): A few sample pages as one PDF (max 15 MB, must be a real PDF). Returned as a
+    public URL that shoppers read on the product page. On `PATCH`, a new file replaces the old one and an empty value
+    (`preview_pdf=`) removes it.
   * `category` (*Required, Integer*): Category ID
   * `title` (*Required, String*): `"Wireless Mouse M185"`
   * `description` (*Optional, String*): `"High precision ergonomic mouse"`
@@ -850,9 +856,12 @@ Every vendor has an automated virtual wallet.
 - Login, OTP-verify, buyer register-verify and admin login responses now include `data.refresh_token`, so SPA clients
   can refresh with `POST /api/auth/getRefreshToken/ {refresh_token}` without relying on cross-site cookies.
   Admin login returns the same `{user, kyc_profile}` shape as the regular login.
-- `GET /api/products/products` supports `?category=` (a parent category also matches its sub-categories),
-  `?min_price=`, `?max_price=`, `?in_stock=1` and `?ordering=price|-price|-created_at|title`; search also matches
-  shop and category names.
+- `GET /api/products/products` supports `?category=` (a category also matches everything below it — sub- and
+  sub-sub-categories), `?min_price=`, `?max_price=`, `?in_stock=1` and `?ordering=price|-price|-created_at|title`;
+  search also matches shop and category names.
+- Categories can be nested **three levels** deep (e.g. `Stationery → Pens & Pencils → Ball Pens`). Creating or moving a
+  category deeper than that, or inside its own branch, returns 400. `facets` counts roll up to every ancestor, and a
+  product's `category_details.ancestors` lists `[{id, name}]` from the top-level category down to the direct parent.
 - Vendors can open / edit / delete **their own** products in any approval state; editing someone else's product returns
   403. Editing a `REJECTED` product sends it back to `PENDING`. `woner_commission` is admin-only.
 - Product images: only the owning vendor (or admin) can add / update / delete; setting `is_primary` unsets the others.
@@ -887,6 +896,8 @@ Creates roles, cities, a category tree, two vendor shops with products, policies
 | `POST` | `/api/marketing/landing/<slug>/order/` | Public | Guest order: `{items:[{product_id,quantity}], full_name, phone_number, address, pathao_city_id, pathao_zone_id, pathao_area_id, coupon_code?, note?}` |
 | `CRUD` | `/api/marketing/coupons/` | Admin | Discount codes |
 | `POST` | `/api/marketing/coupons/validate/` | Public | `{code, subtotal}` → `{discount}` |
+| `GET` | `/api/marketing/site-settings/` | Public | Store contact details: `whatsapp_number`, `whatsapp_message`, `whatsapp_enabled`, `whatsapp_url` (ready-made wa.me link, `null` when off), `hotline`, `support_email`, `address`, `facebook_url` |
+| `PATCH` | `/api/marketing/site-settings/` | Admin (`change_sitesettings`) | Update contact details; a local number like `01712345678` is saved as `8801712345678` |
 
 - Checkout (`POST /api/orders/buyer/orders/`) accepts `coupon_code` and `note`.
 - Orders now include `discount_amount`, `coupon_code`, `source` (`WEBSITE` / `LANDING`), `landing_page`, `customer_note`; `grand_total` subtracts the discount and so does the Pathao cash-to-collect amount.

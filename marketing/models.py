@@ -1,4 +1,5 @@
 from decimal import Decimal
+from urllib.parse import quote
 
 from django.conf import settings
 from django.db import models
@@ -47,7 +48,7 @@ class LandingPage(models.Model):
     headline = models.CharField(max_length=255, blank=True)
     description = models.TextField(blank=True)
     banner_image = models.ImageField(upload_to='landing/', blank=True, null=True)
-    theme_color = models.CharField(max_length=7, default='#df3b3b')
+    theme_color = models.CharField(max_length=7, default='#cc0066')
     cta_text = models.CharField(max_length=60, default='Order now')
     is_active = models.BooleanField(default=True)
     starts_at = models.DateTimeField(blank=True, null=True)
@@ -126,3 +127,38 @@ class Coupon(models.Model):
         else:
             discount = self.value
         return min(discount, subtotal), None
+
+
+class SiteSettings(models.Model):
+    """Single row of storefront contact details (floating WhatsApp button, hotline, footer)."""
+    whatsapp_number = models.CharField(max_length=20, blank=True, help_text='Digits with country code, e.g. 8801712345678')
+    whatsapp_message = models.CharField(max_length=255, blank=True, default='Hello! I would like to know about a book.')
+    whatsapp_enabled = models.BooleanField(default=True)
+    hotline = models.CharField(max_length=20, blank=True)
+    support_email = models.EmailField(blank=True)
+    address = models.CharField(max_length=255, blank=True)
+    facebook_url = models.URLField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Site settings'
+        verbose_name_plural = 'Site settings'
+
+    def __str__(self):
+        return 'Site settings'
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    @property
+    def whatsapp_url(self):
+        if not (self.whatsapp_enabled and self.whatsapp_number):
+            return None
+        url = f'https://wa.me/{self.whatsapp_number}'
+        return f'{url}?text={quote(self.whatsapp_message)}' if self.whatsapp_message else url

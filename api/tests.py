@@ -13,6 +13,16 @@ from vendors.models import ShopProfile, ShopReview
 User = get_user_model()
 
 
+def finish_login_otp(client, path, phone, res):
+    """Super admins get a code by SMS after the password; tests read it from the database."""
+    if res.status_code == 200 and res.data.get('status') == 'otp_required':
+        from users.models import OTPVerification
+        code = OTPVerification.objects.get(phone_number=phone).otp_code
+        res = client.post(path, {'phone_number': phone, 'password': 'password123', 'otp_code': code}, format='json')
+    return res
+
+
+
 class FrontendSupportEndpointsTestCase(TestCase):
     """Endpoints added / hardened for the Next.js frontend."""
 
@@ -38,6 +48,7 @@ class FrontendSupportEndpointsTestCase(TestCase):
 
     def login(self, phone):
         res = self.client.post('/api/auth/login/', {'phone_number': phone, 'password': 'password123'}, format='json')
+        res = finish_login_otp(self.client, '/api/auth/login/', phone, res)
         self.assertEqual(res.status_code, status.HTTP_200_OK, res.data)
         self.assertIn('refresh_token', res.data['data'])
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
@@ -107,6 +118,73 @@ class FrontendSupportEndpointsTestCase(TestCase):
         self.pending_product.refresh_from_db()
         self.assertEqual(self.pending_product.approval_status, 'PENDING')
 
+    def test_admin_creates_product_for_a_shop(self):
+        self.login('01844444444')
+        payload = {'title': 'Admin Book', 'category': self.child.id, 'price': '250', 'stock_quantity': 5, 'woner_commission': '7'}
+        res = self.client.post('/api/products/products', payload, format='json')
+        self.assertEqual(res.status_code, 400)
+        self.assertIn('shop', res.data.get('errors', res.data) if isinstance(res.data, dict) else {})
+        res = self.client.post('/api/products/products', {**payload, 'shop': 9999}, format='json')
+        self.assertEqual(res.status_code, 400)
+        res = self.client.post('/api/products/products', {**payload, 'shop': self.other_shop.id}, format='json')
+        self.assertEqual(res.status_code, 201, res.data)
+        product = Product.objects.get(title='Admin Book')
+        self.assertEqual(product.shop, self.other_shop)
+        self.assertEqual(product.approval_status, 'APPROVED')
+        self.assertEqual(product.woner_commission, Decimal('7'))
+
+    def test_preview_pdf_upload_validation_and_removal(self):
+        import shutil
+        import tempfile
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        from django.test import override_settings
+
+        media = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media, ignore_errors=True)
+        pdf = b'%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF'
+        url = f'/api/products/products/{self.product.id}'
+        with override_settings(MEDIA_ROOT=media):
+            self.login('01844444444')
+            fake = SimpleUploadedFile('pages.pdf', b'not a pdf', content_type='application/pdf')
+            self.assertEqual(self.client.patch(url, {'preview_pdf': fake}, format='multipart').status_code, 400)
+            png = SimpleUploadedFile('pages.png', pdf, content_type='image/png')
+            self.assertEqual(self.client.patch(url, {'preview_pdf': png}, format='multipart').status_code, 400)
+
+            res = self.client.patch(url, {'preview_pdf': SimpleUploadedFile('pages.pdf', pdf, content_type='application/pdf')}, format='multipart')
+            self.assertEqual(res.status_code, 200, res.data)
+            self.product.refresh_from_db()
+            self.assertTrue(self.product.preview_pdf.name.startswith('product_previews/'))
+            self.client.credentials()
+            public = self.client.get(url).data
+            self.assertIn('/media/product_previews/', public.get('data', public)['preview_pdf'])
+
+            self.login('01844444444')
+            res = self.client.patch(url, {'preview_pdf': ''}, format='multipart')
+            self.assertEqual(res.status_code, 200, res.data)
+            self.product.refresh_from_db()
+            self.assertFalse(self.product.preview_pdf)
+
+    def test_nested_categories_filter_counts_and_depth(self):
+        running = Category.objects.create(name='Running', parent=self.child)  # Fashion > Shoes > Running
+        deep = Product.objects.create(shop=self.shop, category=running, title='Runner', price=Decimal('500'),
+                                      stock_quantity=3, approval_status='APPROVED')
+        ids = lambda res: sorted(p['id'] for p in res.data['data'])  # noqa: E731
+        self.assertEqual(ids(self.client.get(f'/api/products/products?category={self.parent.id}')), sorted([self.product.id, deep.id]))
+        self.assertEqual(ids(self.client.get(f'/api/products/products?category={running.id}')), [deep.id])
+
+        counts = {c['id']: c['count'] for c in self.client.get('/api/products/products/facets').data['categories']}
+        self.assertEqual((counts[self.parent.id], counts[self.child.id], counts[running.id]), (2, 2, 1))
+
+        detail = self.client.get(f'/api/products/products/{deep.id}').data
+        detail = detail.get('data', detail)
+        self.assertEqual([a['name'] for a in detail['category_details']['ancestors']], ['Fashion', 'Shoes'])
+
+        self.login('01844444444')
+        too_deep = self.client.post('/api/products/categories', {'name': 'Trail', 'parent': running.id}, format='json')
+        self.assertEqual(too_deep.status_code, 400)
+        loop = self.client.patch(f'/api/products/categories/{self.parent.id}', {'parent': running.id}, format='json')
+        self.assertEqual(loop.status_code, 400)
+
     def test_parent_category_filter_includes_children(self):
         res = self.client.get(f'/api/products/products?category={self.parent.id}')
         self.assertEqual([p['id'] for p in res.data['data']], [self.product.id])
@@ -165,6 +243,7 @@ class StaffPermissionTestCase(TestCase):
 
     def login(self, phone):
         res = self.client.post('/api/admin/login/', {'phone_number': phone, 'password': 'password123'}, format='json')
+        res = finish_login_otp(self.client, '/api/admin/login/', phone, res)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
         return res.data['data']['user']['user']
 
@@ -177,6 +256,16 @@ class StaffPermissionTestCase(TestCase):
         self.assertEqual(self.client.get('/api/auth/').status_code, 403)
         self.assertEqual(self.client.get('/api/orders/admin/orders/commissions/').status_code, 403)
         self.assertEqual(self.client.post('/api/products/categories', {'name': 'X'}, format='json').status_code, 403)
+
+    def test_staff_needs_product_permission_to_add_products(self):
+        from django.contrib.auth.models import Permission
+        vendor = User.objects.create_user(phone_number='01877777770', password='password123', is_approved=True)
+        shop = ShopProfile.objects.create(user=vendor, shop_name='Gamma', shop_address='Dhaka')
+        payload = {'title': 'Staff Book', 'price': '100', 'stock_quantity': 1, 'shop': shop.id}
+        self.login('01855555555')
+        self.assertEqual(self.client.post('/api/products/products', payload, format='json').status_code, 403)
+        self.group.permissions.add(Permission.objects.get(codename='add_product'))
+        self.assertEqual(self.client.post('/api/products/products', payload, format='json').status_code, 201)
 
     def test_superuser_has_full_access(self):
         self.login('01866666666')
@@ -273,6 +362,7 @@ class MarketingAndEngagementTestCase(TestCase):
 
     def login(self, phone, path='/api/auth/login/'):
         res = self.client.post(path, {'phone_number': phone, 'password': 'password123'}, format='json')
+        res = finish_login_otp(self.client, path, phone, res)
         self.client.credentials(HTTP_AUTHORIZATION=f"Bearer {res.data['data']['access_token']}")
 
     def test_guest_landing_order_creates_buyer_and_applies_coupon_once(self):
@@ -288,6 +378,20 @@ class MarketingAndEngagementTestCase(TestCase):
         # usage limit reached
         payload['phone_number'] = '01895555555'
         self.assertEqual(self.client.post('/api/marketing/landing/ssc-pack/order/', payload, format='json').status_code, 400)
+
+    def test_site_settings_public_read_admin_write(self):
+        res = self.client.get('/api/marketing/site-settings/')
+        self.assertEqual(res.status_code, 200)
+        self.assertIsNone(res.data['whatsapp_url'])
+        self.assertEqual(self.client.patch('/api/marketing/site-settings/', {'whatsapp_number': '01712345678'}, format='json').status_code, 401)
+        self.login('01892222222')
+        self.assertEqual(self.client.patch('/api/marketing/site-settings/', {'whatsapp_number': '01712345678'}, format='json').status_code, 403)
+        self.login('01893333333', '/api/admin/login/')
+        res = self.client.patch('/api/marketing/site-settings/', {'whatsapp_number': '017-1234 5678', 'whatsapp_message': 'Hi there'}, format='json')
+        self.assertEqual(res.status_code, 200, res.data)
+        self.assertEqual(res.data['whatsapp_number'], '8801712345678')
+        self.assertEqual(res.data['whatsapp_url'], 'https://wa.me/8801712345678?text=Hi%20there')
+        self.assertEqual(self.client.patch('/api/marketing/site-settings/', {'whatsapp_number': '123'}, format='json').status_code, 400)
 
     def test_landing_order_rejects_products_outside_the_page(self):
         payload = {'items': [{'product_id': self.other.id, 'quantity': 1}], 'full_name': 'X',
@@ -324,3 +428,131 @@ class MarketingAndEngagementTestCase(TestCase):
         self.assertEqual(self.client.post('/api/products/reviews', review, format='json').status_code, 201)
         self.book.refresh_from_db()
         self.assertEqual((self.book.rating_avg, self.book.rating_count), (5.0, 1))
+
+
+class SuperAdminLoginOTPTestCase(TestCase):
+    """Super admins sign in with password + a code sent by SMS; everyone else with just a password."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        buyer_role, _ = Lookup.objects.get_or_create(name='ROLE', value='BUYER')
+        self.buyer = User.objects.create_user(phone_number='01811112222', password='password123', role=buyer_role, is_phone_verified=True, is_approved=True)
+        self.staff = User.objects.create_user(phone_number='01811113333', password='password123', is_staff=True, is_phone_verified=True, is_approved=True)
+        self.admin = User.objects.create_superuser(phone_number='01811114444', password='password123')
+
+    def post(self, url, **data):
+        return self.client.post(url, {'phone_number': self.admin.phone_number, 'password': 'password123', **data}, format='json')
+
+    def code(self):
+        from users.models import OTPVerification
+        return OTPVerification.objects.get(phone_number=self.admin.phone_number).otp_code
+
+    def test_buyer_and_staff_need_no_code(self):
+        res = self.client.post('/api/auth/login/', {'phone_number': self.buyer.phone_number, 'password': 'password123'}, format='json')
+        self.assertIn('access_token', res.data['data'])
+        res = self.client.post('/api/admin/login/', {'phone_number': self.staff.phone_number, 'password': 'password123'}, format='json')
+        self.assertIn('access_token', res.data['data'])
+
+    def test_super_admin_needs_code_on_both_login_endpoints(self):
+        for url in ('/api/admin/login/', '/api/auth/login/'):
+            res = self.post(url)
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertEqual(res.data['status'], 'otp_required')
+            self.assertNotIn('access_token', str(res.data))
+            self.assertNotIn('access_token', res.cookies)
+            res = self.post(url, otp_code=self.code())
+            self.assertEqual(res.status_code, status.HTTP_200_OK)
+            self.assertIn('access_token', res.data['data'])
+
+    def test_wrong_password_sends_no_code(self):
+        res = self.client.post('/api/admin/login/', {'phone_number': self.admin.phone_number, 'password': 'nope'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        from users.models import OTPVerification
+        self.assertFalse(OTPVerification.objects.filter(phone_number=self.admin.phone_number).exists())
+
+    def test_code_needs_the_password_too(self):
+        self.post('/api/admin/login/')
+        res = self.client.post('/api/admin/login/', {'phone_number': self.admin.phone_number, 'password': 'nope', 'otp_code': self.code()}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_wrong_code_and_reuse_are_rejected(self):
+        self.post('/api/admin/login/')
+        good = self.code()
+        bad = '000000' if good != '000000' else '111111'
+        self.assertEqual(self.post('/api/admin/login/', otp_code=bad).status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self.post('/api/admin/login/', otp_code=good).status_code, status.HTTP_200_OK)
+        self.assertEqual(self.post('/api/admin/login/', otp_code=good).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_too_many_wrong_codes_burn_the_code(self):
+        self.post('/api/admin/login/')
+        good = self.code()
+        bad = '000000' if good != '000000' else '111111'
+        for _ in range(5):
+            self.post('/api/admin/login/', otp_code=bad)
+        self.assertEqual(self.post('/api/admin/login/', otp_code=good).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_expired_code_is_rejected(self):
+        from datetime import timedelta
+        from django.utils import timezone
+        from users.models import OTPVerification
+        self.post('/api/admin/login/')
+        OTPVerification.objects.filter(phone_number=self.admin.phone_number).update(expires_at=timezone.now() - timedelta(seconds=1))
+        self.assertEqual(self.post('/api/admin/login/', otp_code=self.code()).status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_less_code_login_is_closed_for_super_admin(self):
+        res = self.client.post('/api/auth/login-otp/', {'phone_number': self.admin.phone_number}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+        from datetime import timedelta
+        from django.utils import timezone
+        from users.models import OTPVerification
+        OTPVerification.objects.create(phone_number=self.admin.phone_number, otp_code='654321', expires_at=timezone.now() + timedelta(minutes=5))
+        res = self.client.post('/api/auth/verify-otp/', {'phone_number': self.admin.phone_number, 'otp_code': '654321'}, format='json')
+        self.assertNotIn('access_token', str(res.data))
+        self.assertNotIn('access_token', res.cookies)
+
+
+class DefaultRolesTestCase(TestCase):
+    """Default roles exist after migrate and limit staff to their own area."""
+
+    def staff_with(self, role, phone):
+        from django.contrib.auth.models import Group
+        user = User.objects.create_user(phone_number=phone, password='password123', is_staff=True, is_approved=True, is_phone_verified=True)
+        user.groups.add(Group.objects.get(name=role))
+        client = APIClient()
+        client.force_authenticate(user)
+        return client
+
+    def test_default_roles_are_created_with_permissions(self):
+        from django.contrib.auth.models import Group
+        from users.roles import DEFAULT_ROLES
+        for name in DEFAULT_ROLES:
+            self.assertTrue(Group.objects.get(name=name).permissions.exists(), name)
+        vendor = Group.objects.get(name='retailer')
+        self.assertTrue(vendor.permissions.filter(codename='add_product').exists())
+        self.assertFalse(vendor.permissions.filter(codename='can_auto_approve_product').exists())
+        self.assertFalse(Group.objects.get(name='buyer').permissions.filter(codename='add_product').exists())
+
+    def test_accountant_sees_reports_but_cannot_manage_orders(self):
+        client = self.staff_with('Accountant', '01877770001')
+        self.assertEqual(client.get('/api/finance/reports/').status_code, 200)
+        self.assertEqual(client.get('/api/orders/admin/orders/').status_code, 200)
+        self.assertEqual(client.post('/api/orders/admin/orders/1/approve/', {}, format='json').status_code, 403)
+        self.assertEqual(client.get('/api/admin/staff/').status_code, 403)
+
+    def test_order_manager_cannot_see_money(self):
+        client = self.staff_with('Order manager', '01877770002')
+        self.assertEqual(client.get('/api/orders/admin/orders/').status_code, 200)
+        self.assertEqual(client.get('/api/finance/reports/').status_code, 403)
+        self.assertEqual(client.get('/api/finance/ledger/').status_code, 403)
+
+    def test_setup_roles_keeps_admin_changes_unless_reset(self):
+        from django.contrib.auth.models import Group
+        from users.roles import setup_default_roles
+        role = Group.objects.get(name='Accountant')
+        role.permissions.clear()
+        setup_default_roles()
+        self.assertFalse(role.permissions.exists())
+        setup_default_roles(reset=True)
+        self.assertTrue(role.permissions.exists())
